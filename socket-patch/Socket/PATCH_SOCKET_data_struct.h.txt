@@ -1,0 +1,9 @@
+PATCH_SOCKET_DATA_STRUCT_H
+#include <torch/script.h> // One-stop header.
+
+PATCH_SOCKET_VARIABLES
+  //Socket Model//
+  Socket DNN;
+
+PATCH_SOCKET_H
+#include "socket_struct.h"

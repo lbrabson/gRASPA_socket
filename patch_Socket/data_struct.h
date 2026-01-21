@@ -13,7 +13,9 @@
 
 //###PATCH_ALLEGRO_DATA_STRUCT_H###//
 
-//###PATCH_SOCKET_DATA_STRUCT_H###//
+//###PATCH_SOCKET_DATA_STRUCT_H_PATCHED###//
+#include <torch/script.h> // One-stop header.
+
 #define BLOCKSIZE 1024
 #define DEFAULTTHREAD 128
 double Get_Uniform_Random();
@@ -884,7 +886,8 @@ struct Boxsize
 };
 //###PATCH_ALLEGRO_H###//
 
-//###PATCH_SOCKET_H###//
+//###PATCH_SOCKET_H_PATCHED###//
+#include "socket_struct.h"
 
 struct CBMC_Variables
 {
@@ -1123,7 +1126,10 @@ struct Components
   bool UseSocket = false;
   //###PATCH_ALLEGRO_VARIABLES###//
 
-  //###PATCH_SOCKET_VARIABLES###//
+  //###PATCH_SOCKET_VARIABLES_PATCHED###//
+  //Socket Model//
+  Socket DNN;
+
 
   //###PATCH_LCLIN_VARIABLES###//
   std::vector<std::string>ModelName;                  // Name (folder) of the stored model

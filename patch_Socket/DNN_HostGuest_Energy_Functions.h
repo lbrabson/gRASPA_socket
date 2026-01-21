@@ -166,7 +166,18 @@ void Prepare_DNN_InitialPositions_Reinsertion(Atoms*& d_a, Atoms& Old, double3* 
   Initialize_DNN_Positions_Reinsertion<<<1,1>>>(temp, d_a, Old, Oldsize, Newsize, Location, SelectedComponent);
 }
 //###PATCH_ALLEGRO_CONSIDER_DNN_ATOMS###//
-//###PATCH_SOCKET_CONSIDER_DNN_ATOMS###//
+//###PATCH_SOCKET_CONSIDER_DNN_ATOMS_PATCHED###//
+void Check_DNNAtom_and_copy_pos_to_UCAtoms(double3* temp_pos, Atoms& UCAtoms, bool* ConsiderThisAdsorbateAtom, size_t Molsize)
+{
+  size_t update_i = 0;
+  for(size_t i = 0; i < Molsize; i++)
+  {
+    if(ConsiderThisAdsorbateAtom[i])
+      UCAtoms.pos[update_i] = temp_pos[i];
+    update_i ++;
+  }
+}
+
 
 double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size_t SelectedComponent, int MoveType)
 {
@@ -177,7 +188,27 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
     double DNN_New = 0.0;
     //###PATCH_ALLEGRO_INSERTION###//
     //###PATCH_LCLIN_INSERTION###//
-    //###PATCH_SOCKET_INSERTION###//
+    //###PATCH_SOCKET_INSERTION_PATCHED###//
+    if(SystemComponents.UseSocket)
+    {
+      bool Initialize = false;
+      double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
+      cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
+      Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+//      if(SystemComponents.CURRENTCYCLE <= 30)
+//      {
+//        printf("DNN INSERTION BEFORE CHECK DNN PseudoAtoms\n");
+//        for(size_t i = 0; i < SystemComponents.Moleculesize[SelectedComponent]; i++)
+//          printf("pos: %f %f %f\n", temp_pos[i].x, temp_pos[i].y, temp_pos[i].z);
+//
+//        printf("DNN INSERTION AFTER CHECK DNN PseudoAtoms\n");
+//        for(size_t i = 0; i < SystemComponents.DNN.UCAtoms[SelectedComponent].size; i++)
+//          printf("pos: %f %f %f\n", SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].x, SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].y, SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].z);
+//      }
+      DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+      free(temp_pos);
+    }
+
     return DNN_New;
   }
   case DELETION:
@@ -185,7 +216,17 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
     double DNN_New = 0.0;
     //###PATCH_ALLEGRO_DELETION###//
     //###PATCH_LCLIN_DELETION###//
-    //###PATCH_SOCKET_DELETION###//
+    //###PATCH_SOCKET_DELETION_PATCHED###//
+    if(SystemComponents.UseSocket)
+    {
+      bool Initialize = false;
+      double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
+      cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
+      Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+      DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+      free(temp_pos);
+    }
+
     return DNN_New;
   }
   case TRANSLATION: case ROTATION: case SINGLE_INSERTION: case SINGLE_DELETION:
@@ -193,7 +234,31 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
     double DNN_New = 0.0; double DNN_Old = 0.0;
     //###PATCH_ALLEGRO_SINGLE###//
     //###PATCH_LCLIN_SINGLE###//
-    //###PATCH_SOCKET_SINGLE###//
+    //###PATCH_SOCKET_SINGLE_PATCHED###//
+    bool Do_New = true; bool Do_Old = true;
+    if(MoveType == SINGLE_INSERTION) Do_Old = false;
+    if(MoveType == SINGLE_DELETION)  Do_New = false;
+    if(SystemComponents.UseSocket)
+    {
+      bool Initialize = false;
+      double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
+      if(Do_New)
+      {
+        cudaMemcpy(temp_pos, Sims.New.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
+        Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+        DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+        //printf("DNN_New %f\n", DNN_New);
+      }
+      if(Do_Old)
+      {
+        cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
+        Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+        DNN_Old = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+        //printf("DNN_New %f\n", DNN_Old);
+      }
+      free(temp_pos);
+    }
+
     return DNN_New - DNN_Old;
   }
   }
@@ -205,7 +270,22 @@ double DNN_Prediction_Reinsertion(Components& SystemComponents, Simulations& Sim
   double DNN_New = 0.0; double DNN_Old = 0.0;
   //###PATCH_ALLEGRO_REINSERTION###//
   //###PATCH_LCLIN_REINSERTION###//
-  //###PATCH_SOCKET_REINSERTION###//
+  //###PATCH_SOCKET_REINSERTION_PATCHED###//
+  if(SystemComponents.UseSocket)
+  {
+    bool Initialize = false;
+    double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
+    //NEW//
+    cudaMemcpy(temp_pos, temp, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
+    Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+    DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+    //OLD//
+    cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
+    Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+    DNN_Old = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+    free(temp_pos);
+  }
+
   return DNN_New - DNN_Old;
 }
 
@@ -214,7 +294,24 @@ double DNN_Prediction_Total(Components& SystemComponents, Simulations& Sims)
   double DNN_E = 0.0;
   //###PATCH_ALLEGRO_FXNMAIN###//
   //###PATCH_LCLIN_FXNMAIN###//
-  //###PATCH_SOCKET_FXNMAIN###//
+  //###PATCH_SOCKET_FXNMAIN_PATCHED###//
+  if(SystemComponents.UseSocket)
+  {
+    bool Initialize = false;
+    size_t comp = 1;
+    for(size_t i = 0; i < SystemComponents.NumberOfMolecule_for_Component[comp]; i++)
+    {
+      size_t update_i = 0;
+      for(size_t j = 0; j < SystemComponents.Moleculesize[comp]; j++)
+      {
+        if(!SystemComponents.ConsiderThisAdsorbateAtom[j]) continue;
+        size_t AtomIdx = i * SystemComponents.Moleculesize[comp] + j;
+        SystemComponents.DNN.UCAtoms[comp].pos[update_i] = SystemComponents.HostSystem[comp].pos[AtomIdx];
+        update_i ++;
+      }
+      DNN_E += SystemComponents.DNN.MCEnergyWrapper(comp, Initialize, SystemComponents.DNNEnergyConversion);
+    }
+  }
   return DNN_E;
 }
 
