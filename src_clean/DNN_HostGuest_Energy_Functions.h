@@ -166,7 +166,7 @@ void Prepare_DNN_InitialPositions_Reinsertion(Atoms*& d_a, Atoms& Old, double3* 
   Initialize_DNN_Positions_Reinsertion<<<1,1>>>(temp, d_a, Old, Oldsize, Newsize, Location, SelectedComponent);
 }
 //###PATCH_ALLEGRO_CONSIDER_DNN_ATOMS###//
-//###PATCH_SOCKET_CONSIDER_DNN_ATOMS###//
+#include "socket_integration.h"
 
 double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size_t SelectedComponent, int MoveType)
 {
@@ -177,7 +177,8 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
     double DNN_New = 0.0;
     //###PATCH_ALLEGRO_INSERTION###//
     //###PATCH_LCLIN_INSERTION###//
-    //###PATCH_SOCKET_INSERTION###//
+    if(SystemComponents.UseSocket)
+      DNN_New = Socket_Prediction_Move(SystemComponents, Sims, SelectedComponent, INSERTION);
     return DNN_New;
   }
   case DELETION:
@@ -185,7 +186,8 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
     double DNN_New = 0.0;
     //###PATCH_ALLEGRO_DELETION###//
     //###PATCH_LCLIN_DELETION###//
-    //###PATCH_SOCKET_DELETION###//
+    if(SystemComponents.UseSocket)
+      DNN_New = Socket_Prediction_Move(SystemComponents, Sims, SelectedComponent, DELETION);
     return DNN_New;
   }
   case TRANSLATION: case ROTATION: case SINGLE_INSERTION: case SINGLE_DELETION:
@@ -193,7 +195,13 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
     double DNN_New = 0.0; double DNN_Old = 0.0;
     //###PATCH_ALLEGRO_SINGLE###//
     //###PATCH_LCLIN_SINGLE###//
-    //###PATCH_SOCKET_SINGLE###//
+    if(SystemComponents.UseSocket)
+    {
+      // Socket returns delta energy (new - old) for single particle moves
+      double DNN_Delta = Socket_Prediction_Move(SystemComponents, Sims, SelectedComponent, MoveType);
+      DNN_New = DNN_Delta;
+      DNN_Old = 0.0;  // Delta already computed
+    }
     return DNN_New - DNN_Old;
   }
   }
@@ -205,7 +213,12 @@ double DNN_Prediction_Reinsertion(Components& SystemComponents, Simulations& Sim
   double DNN_New = 0.0; double DNN_Old = 0.0;
   //###PATCH_ALLEGRO_REINSERTION###//
   //###PATCH_LCLIN_REINSERTION###//
-  //###PATCH_SOCKET_REINSERTION###//
+  if(SystemComponents.UseSocket)
+  {
+    double DNN_Delta = Socket_Prediction_Reinsertion(SystemComponents, Sims, SelectedComponent, temp);
+    DNN_New = DNN_Delta;
+    DNN_Old = 0.0;
+  }
   return DNN_New - DNN_Old;
 }
 
@@ -214,7 +227,8 @@ double DNN_Prediction_Total(Components& SystemComponents, Simulations& Sims)
   double DNN_E = 0.0;
   //###PATCH_ALLEGRO_FXNMAIN###//
   //###PATCH_LCLIN_FXNMAIN###//
-  //###PATCH_SOCKET_FXNMAIN###//
+  if(SystemComponents.UseSocket)
+    DNN_E = Socket_Prediction_Total(SystemComponents, Sims);
   return DNN_E;
 }
 

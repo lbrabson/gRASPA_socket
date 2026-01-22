@@ -15,6 +15,7 @@
 //#include "write_data.h"
 #include "equations_of_state.h"
 #include "fxn_main.h"
+#include "socket_integration.h"
 
 #include <unistd.h>
 
@@ -321,7 +322,10 @@ Variables Initialize(void) //for pybind
       //Test reading Tensorflow model//
       //###PATCH_LCLIN_MAIN_PREP###//
       //###PATCH_ALLEGRO_MAIN_PREP###//
-      //###PATCH_SOCKET_MAIN_PREP###//
+      if(Vars.SystemComponents[a].UseSocket)
+      {
+        Socket_Initialize(Vars.SystemComponents[a], Vars.Sims[a], Vars.Box[a]);
+      }
     }
     //Prepare detailed Identity Swap statistics if there are more than 1 component//
     for(size_t i = 0; i < Vars.SystemComponents.size(); i++)
@@ -445,10 +449,20 @@ void EndOfSimulationWrapUp(Variables& Vars)
   printMemoryUsage();
   /*
   if(Vars.SystemComponents[a].UseDNNforHostGuest)
-  { 
+  {
     Free_DNN_Model(Vars.SystemComponents[0]);
-  } 
+  }
   */
+
+  // Finalize socket connections
+  for(size_t i = 0; i < Vars.SystemComponents.size(); i++)
+  {
+    if(Vars.SystemComponents[i].UseSocket)
+    {
+      Socket_Finalize();
+      break;  // Only need to finalize once (singleton)
+    }
+  }
 
   for(size_t i = 0; i < Vars.SystemComponents.size(); i++)
     if(Vars.SystemComponents[i].OUTPUT != stderr)

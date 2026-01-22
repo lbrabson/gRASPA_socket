@@ -3120,6 +3120,17 @@ void ReadDNNModelSetup(Components& SystemComponents)
       else
       {throw std::runtime_error("Unknown Energy Unit for DNN Model");}
     }
+    // Socket calculator configuration
+    if (str.find("SocketType", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      SystemComponents.SocketType = termsScannedLined[1];
+    }
+    if (str.find("SocketAddress", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      SystemComponents.SocketAddress = termsScannedLined[1];
+    }
   }
   if(SystemComponents.UseDNNforHostGuest && !DNNUnitFound)
     throw std::runtime_error("You are using DNN models but there is no ENERGY UNIT specified!!!!");

@@ -1,8 +1,9 @@
 #!/bin/bash
 
-rm nvc_main.x
+rm -f nvc_main.x
 
 CXX="nvc++"
+GXX="g++"
 #NOTE: TO RUN THE EXECUTABLE, YOU NEED TO LOAD THE ENVIRONMENT OF NVIDIA-HPC-SDK
 torchDir="/storage/home/hcoda1/8/lbrabson3/r-amedford6-0/gRASPA_dir/libtorch"
 
@@ -12,6 +13,16 @@ LINKFLAG="-D_GLIBCXX_USE_CXX11_ABI=1 -L${torchDir}/lib -I${torchDir}/include/ -I
 
 #NVCFLAG="-O3 -std=c++20 -gpu=cc86 -Minline -fopenmp -Minfo -DUSE_DOUBLE -cuda"
 NVCFLAG="-O3 -std=c++20 -target=gpu -Minline -fopenmp -cuda -stdpar=multicore"
+GXXFLAG="-O3 -std=c++17 -I."
+
+# Compile socket library with g++ (pure C++, no CUDA needed)
+mkdir -p socket
+$GXX $GXXFLAG -c socket/SocketClient.cpp -o socket/SocketClient.o
+$GXX $GXXFLAG -c socket/IPIProtocol.cpp -o socket/IPIProtocol.o
+$GXX $GXXFLAG -c socket/DNNSocketInterface.cpp -o socket/DNNSocketInterface.o
+
+# Compile socket integration with nvc++ (uses CUDA memcpy)
+$CXX $NVCFLAG $LINKFLAG -c socket_integration.cpp -o socket_integration.o
 
 $CXX $NVCFLAG $LINKFLAG -c axpy.cu
 
@@ -23,6 +34,10 @@ $CXX $NVCFLAG $LINKFLAG -c data_struct.cpp
 
 $CXX $NVCFLAG $LINKFLAG -c VDW_Coulomb.cu
 
-$CXX $NVCFLAG $LINKFLAG main.o read_data.o axpy.o data_struct.o VDW_Coulomb.o -o nvc_main.x
+# Link all object files including socket library
+$CXX $NVCFLAG $LINKFLAG main.o read_data.o axpy.o data_struct.o VDW_Coulomb.o \
+    socket/SocketClient.o socket/IPIProtocol.o socket/DNNSocketInterface.o \
+    socket_integration.o \
+    -lpthread -o nvc_main.x
 
-rm *.o
+rm -f *.o socket/*.o

@@ -1123,7 +1123,9 @@ struct Components
   bool UseSocket = false;
   //###PATCH_ALLEGRO_VARIABLES###//
 
-  //###PATCH_SOCKET_VARIABLES###//
+  // Socket calculator settings
+  std::string SocketType = "unix";                    // "unix" or "tcp"
+  std::string SocketAddress = "/tmp/graspa.sock";     // path (unix) or host:port (tcp)
 
   //###PATCH_LCLIN_VARIABLES###//
   std::vector<std::string>ModelName;                  // Name (folder) of the stored model
