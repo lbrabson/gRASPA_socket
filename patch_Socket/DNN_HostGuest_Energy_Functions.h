@@ -209,6 +209,11 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
       free(temp_pos);
     }
 
+
+    //printf("DNN_Prediction_Move: MoveType=%d, SelectedComponent=%zu, Energy=% .10f\n",
+    //    MoveType, SelectedComponent, DNN_New);
+    //fflush(stdout);
+
     return DNN_New;
   }
   case DELETION:

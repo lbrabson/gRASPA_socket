@@ -79,22 +79,30 @@ struct Socket
     }
 
     /* Robust read */
-    ssize_t read_all(void *buf, size_t count)
-    {
-        size_t left = count;
-        char *ptr = (char *)buf;
+ssize_t read_all(void *buf, size_t count)
+{
+    size_t left = count;
+    char *ptr = (char *)buf;
 
-        while (left > 0) {
-            ssize_t r = read(fd, ptr, left);
-            if (r <= 0) {
-                perror("read");
-                return -1;
-            }
-            left -= r;
-            ptr  += r;
+    while (left > 0) {
+        ssize_t r = read(fd, ptr, left);
+
+        if (r == 0) {
+            fprintf(stderr, "SOCKET CLOSED BY ASE — BAD PACKET SENT\n");
+            exit(EXIT_FAILURE);
         }
-        return count;
+
+        if (r < 0) {
+            perror("read error");
+            exit(EXIT_FAILURE);
+        }
+
+        left -= r;
+        ptr  += r;
     }
+    return count;
+}
+
 
     /* Send ASCII command */
     int send_command(const char *cmd)
@@ -104,21 +112,53 @@ struct Socket
         return write_all(buffer, strlen(buffer));
     }
 
-    /* Send positions (Bohr) */
+    /* Send positions */
     int send_positions(const double *xyz)
     {
         send_command("POSDATA");
-        write_all(&natoms, sizeof(int));
+
+        int n = (int)natoms;
+        write_all(&n, sizeof(int));
+
+        // send cell (ASE requires this)
+        write_all(ReplicaBox.Cell, sizeof(double) * 9);
+
         write_all(xyz, sizeof(double) * 3 * natoms);
+
         return 0;
     }
 
     /* Receive energy */
+    // int receive_energy(double *energy_ev)
+    // {
+    //     char header[8];
+
+    //     // Read header ("FORCES\n") as i-PI sends it
+    //     if (read_all(header, 7) != 7) {
+    //         perror("read header");
+    //         return -1;
+    //     }
+    //     header[7] = '\0';
+
+    //     if (strncmp(header, "FORCES", 6) != 0) {
+    //         fprintf(stderr, "Unexpected i-PI response: %s\n", header);
+    //         return -1;
+    //     }
+
+    //     // Read only the energy (double)
+    //     if (read_all(energy_ev, sizeof(double)) != sizeof(double)) {
+    //         perror("read energy");
+    //         return -1;
+    //     }
+
+    //     return 0;
+    // }
+
     int receive_energy(double *energy_ev)
     {
         char header[8];
 
-        // Read header ("FORCES\n") as i-PI sends it
+        // 1. Read "FORCES\n"
         if (read_all(header, 7) != 7) {
             perror("read header");
             return -1;
@@ -126,18 +166,33 @@ struct Socket
         header[7] = '\0';
 
         if (strncmp(header, "FORCES", 6) != 0) {
-            fprintf(stderr, "Unexpected i-PI response: %s\n", header);
+            fprintf(stderr, "Protocol error: expected FORCES, got %s\n", header);
             return -1;
         }
 
-        // Read only the energy (double)
+        // 2. Energy
         if (read_all(energy_ev, sizeof(double)) != sizeof(double)) {
             perror("read energy");
             return -1;
         }
 
+        // 3. Forces
+        std::vector<double> forces(3 * natoms);
+        if (read_all(forces.data(), sizeof(double) * 3 * natoms) <= 0) {
+            perror("read forces");
+            return -1;
+        }
+
+        // 4. Stress (9 doubles!)
+        double stress[9];
+        if (read_all(stress, sizeof(double) * 9) <= 0) {
+            perror("read stress");
+            return -1;
+        }
+
         return 0;
     }
+
 
     /* Send coords and receive single energy */
     double PredictFromSocket(const double* xyz, size_t n_atoms)
@@ -150,7 +205,8 @@ struct Socket
             printf("  atom %zu: %f %f %f\n",
                 i, xyz[3*i], xyz[3*i+1], xyz[3*i+2]);
         }
-        
+        fflush(stderr);
+
         // send positions
         send_positions(xyz);
 
@@ -460,8 +516,16 @@ struct Socket
     {
         size_t NComp = UCAtoms.size();
         size_t N_UCAtom = 0; for(size_t comp = 0; comp < NComp; comp++) N_UCAtom += UCAtoms[comp].size;
+
+        if (!ReplicaBox.Cell)   // ✅ ensure exists ALWAYS
+        {
+            ReplicaBox.Cell        = (double*) malloc(9 * sizeof(double));
+            ReplicaBox.InverseCell = (double*) malloc(9 * sizeof(double));
+        }
+
         if(Allocate)
         {
+        ReplicaAtoms.resize(UCAtoms.size());
         ReplicaBox.Cell = (double*) malloc(9 * sizeof(double));
         ReplicaBox.InverseCell = (double*) malloc(9 * sizeof(double));
         for(size_t i = 0; i < 9; i++) ReplicaBox.Cell[i] = UCBox.Cell[i];
