@@ -1,3 +1,4 @@
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -25,6 +26,8 @@ struct Socket
     size_t DNN_Molsize = 0; //Atom size to be considered for DNN, since there might be fictional atom sites for a classical sim molecule
 
     size_t nstep = 0;
+
+    bool handshake_done = false;
   
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
@@ -34,6 +37,59 @@ struct Socket
         strncpy(socket_path, path, sizeof(socket_path) - 1);
         socket_path[sizeof(socket_path) - 1] = '\0';
     }
+
+    void send_header(const char *msg)
+    {
+        char header[12];
+        memset(header, ' ', 12);
+        strncpy(header, msg, std::min((size_t)12, strlen(msg)));
+        write_all(header, 12);
+    }
+    
+    // ADD THIS: Send int32 in network byte order  
+    void send_int32(int32_t value)
+    {
+        int32_t net_val = htonl(value);
+        write_all(&net_val, sizeof(int32_t));
+    }
+    
+    // ADD THIS: Initial handshake with ASE
+    int do_ipi_handshake()
+    {
+        // 1. Receive STATUS
+        char header[12];
+        if (read_all(header, 12) != 12) {
+            fprintf(stderr, "Failed to read STATUS header\n");
+            return -1;
+        }
+        
+        if (strncmp(header, "STATUS", 6) != 0) {
+            fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
+            return -1;
+        }
+        
+        // 2. Send NEEDINIT
+        send_header("NEEDINIT");
+        
+        // 3. Receive INIT
+        if (read_all(header, 12) != 12) {
+            fprintf(stderr, "Failed to read INIT header\n");
+            return -1;
+        }
+        
+        if (strncmp(header, "INIT", 4) != 0) {
+            fprintf(stderr, "Expected INIT, got: %.12s\n", header);
+            return -1;
+        }
+        
+        // 4. Receive cell matrices (discard for now)
+        double cell[9], inv_cell[9];
+        read_all(cell, sizeof(double) * 9);
+        read_all(inv_cell, sizeof(double) * 9);
+        
+        printf("i-PI handshake complete\n");
+        return 0;
+    }   
 
     /* Connect to i-PI */
     int connect_socket()
@@ -50,12 +106,24 @@ struct Socket
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
+        printf("Connecting to CHGNet server at: %s\n", socket_path);
+
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             perror("connect");
             close(fd);
             fd = -1;
             return -1;
         }
+
+        printf("Connected successfully\n");
+    
+        if (do_ipi_handshake() < 0) {
+            close(fd);
+            fd = -1;
+            return -1;
+        }
+        
+        handshake_done = true;  // ADD THIS
 
         return 0;
     }
@@ -79,8 +147,8 @@ struct Socket
     }
 
     /* Robust read */
-ssize_t read_all(void *buf, size_t count)
-{
+    ssize_t read_all(void *buf, size_t count)
+    {
     size_t left = count;
     char *ptr = (char *)buf;
 
@@ -101,7 +169,7 @@ ssize_t read_all(void *buf, size_t count)
         ptr  += r;
     }
     return count;
-}
+    }
 
 
     /* Send ASCII command */
@@ -115,67 +183,114 @@ ssize_t read_all(void *buf, size_t count)
     /* Send positions */
     int send_positions(const double *xyz)
     {
-        send_command("POSDATA");
-
-        int n = (int)natoms;
-        write_all(&n, sizeof(int));
-
-        // send cell (ASE requires this)
+        // 1. Wait for STATUS
+        char header[12];
+        read_all(header, 12);
+        if (strncmp(header, "STATUS", 6) != 0) {
+            fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
+            return -1;
+        }
+        
+        // 2. Send READY
+        send_header("READY");
+        
+        // 3. Wait for POSDATA request
+        read_all(header, 12);
+        if (strncmp(header, "POSDATA", 7) != 0) {
+            fprintf(stderr, "Expected POSDATA, got: %.12s\n", header);
+            return -1;
+        }
+        
+        // 4. Send cell matrix (9 doubles)
         write_all(ReplicaBox.Cell, sizeof(double) * 9);
-
+        
+        // 5. Send inverse cell (9 doubles)
+        double inv_cell[9] = {0};
+        write_all(inv_cell, sizeof(double) * 9);
+        
+        // 6. Send number of atoms (int32)
+        send_int32((int32_t)natoms);
+        
+        // 7. Send positions
         write_all(xyz, sizeof(double) * 3 * natoms);
-
-        return 0;
+        
+        // 8. Wait for STATUS
+        read_all(header, 12);
+        if (strncmp(header, "STATUS", 6) != 0) {
+            fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
+            return -1;
     }
-
-    /* Receive energy */
-    // int receive_energy(double *energy_ev)
-    // {
-    //     char header[8];
-
-    //     // Read header ("FORCES\n") as i-PI sends it
-    //     if (read_all(header, 7) != 7) {
-    //         perror("read header");
-    //         return -1;
-    //     }
-    //     header[7] = '\0';
-
-    //     if (strncmp(header, "FORCES", 6) != 0) {
-    //         fprintf(stderr, "Unexpected i-PI response: %s\n", header);
-    //         return -1;
-    //     }
-
-    //     // Read only the energy (double)
-    //     if (read_all(energy_ev, sizeof(double)) != sizeof(double)) {
-    //         perror("read energy");
-    //         return -1;
-    //     }
-
-    //     return 0;
-    // }
+    
+    // 9. Send HAVEDATA
+    send_header("HAVEDATA");
+    
+    // 10. Wait for GETFORCE
+    read_all(header, 12);
+    if (strncmp(header, "GETFORCE", 8) != 0) {
+        fprintf(stderr, "Expected GETFORCE, got: %.12s\n", header);
+        return -1;
+    }
+    
+    return 0;
+    }   
 
     int receive_energy(double *energy_ev)
     {
-        // 1. Energy
+        char header[12];
+        
+        // 1. Read FORCEREADY header (12 bytes!)
+        if (read_all(header, 12) != 12) {
+            perror("read FORCEREADY");
+            return -1;
+        }
+        
+        if (strncmp(header, "FORCEREADY", 10) != 0) {
+            fprintf(stderr, "Expected FORCEREADY, got: %.12s\n", header);
+            return -1;
+        }
+        
+        // 2. Read energy (1 double)
         if (read_all(energy_ev, sizeof(double)) != sizeof(double)) {
             perror("read energy");
             return -1;
         }
-
-        // 2. Forces (discard if unused)
-        std::vector<double> forces(3 * natoms);
-        if (read_all(forces.data(), sizeof(double) * 3 * natoms) <= 0) {
+        
+        // 3. Read natoms (int32)
+        int32_t recv_natoms;
+        if (read_all(&recv_natoms, sizeof(int32_t)) != sizeof(int32_t)) {
+            perror("read natoms");
+            return -1;
+        }
+        recv_natoms = ntohl(recv_natoms);  // Convert from network byte order
+        
+        // 4. Read forces (3*natoms doubles)
+        std::vector<double> forces(3 * recv_natoms);
+        if (read_all(forces.data(), sizeof(double) * 3 * recv_natoms) <= 0) {
             perror("read forces");
             return -1;
         }
-
-        // 3. Stress (6 doubles)
-        double stress[6];
-        if (read_all(stress, sizeof(double) * 6) <= 0) {
-            perror("read stress");
+        
+        // 5. Read virial (9 doubles)
+        double virial[9];
+        if (read_all(virial, sizeof(double) * 9) <= 0) {
+            perror("read virial");
             return -1;
         }
-
+        
+        // 6. Read extras length
+        int32_t extras_len;
+        if (read_all(&extras_len, sizeof(int32_t)) != sizeof(int32_t)) {
+            perror("read extras_len");
+            return -1;
+        }
+        extras_len = ntohl(extras_len);
+        
+        // 7. Read extras if present
+        if (extras_len > 0) {
+            std::vector<char> extras(extras_len);
+            read_all(extras.data(), extras_len);
+        }
+        
         return 0;
     }
 
@@ -250,6 +365,10 @@ ssize_t read_all(void *buf, size_t count)
         double E_total_ev     = PredictFromSocket(xyz_total.data(), n_total);
         double E_framework_ev = PredictFromSocket(xyz_framework.data(), n_framework);
         double E_adsorbate_ev = PredictFromSocket(xyz_adsorbate.data(), n_adsorbate);
+
+        std::cout << "ML E_total_ev     = " << E_total_ev     << " eV" << std::endl;
+        std::cout << "ML E_framework_ev = " << E_framework_ev << " eV" << std::endl;
+        std::cout << "ML E_adsorbate_ev = " << E_adsorbate_ev << " eV" << std::endl;
 
         return E_total_ev - E_framework_ev - E_adsorbate_ev;
     }
@@ -501,8 +620,16 @@ ssize_t read_all(void *buf, size_t count)
     {
         size_t NComp = UCAtoms.size();
         size_t N_UCAtom = 0; for(size_t comp = 0; comp < NComp; comp++) N_UCAtom += UCAtoms[comp].size;
+
+        if (!ReplicaBox.Cell)   // ✅ ensure exists ALWAYS
+        {
+            ReplicaBox.Cell        = (double*) malloc(9 * sizeof(double));
+            ReplicaBox.InverseCell = (double*) malloc(9 * sizeof(double));
+        }
+
         if(Allocate)
         {
+        ReplicaAtoms.resize(UCAtoms.size());
         ReplicaBox.Cell = (double*) malloc(9 * sizeof(double));
         ReplicaBox.InverseCell = (double*) malloc(9 * sizeof(double));
         for(size_t i = 0; i < 9; i++) ReplicaBox.Cell[i] = UCBox.Cell[i];

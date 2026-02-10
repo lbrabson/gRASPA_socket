@@ -6,4 +6,4 @@ PATCH_SOCKET_VARIABLES
   Socket DNN;
 
 PATCH_SOCKET_H
-#include "socket_struct.h"
+#include "ase_energy_client.h"

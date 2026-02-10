@@ -887,7 +887,7 @@ struct Boxsize
 //###PATCH_ALLEGRO_H###//
 
 //###PATCH_SOCKET_H_PATCHED###//
-#include "socket_struct.h"
+#include "ase_energy_client.h"
 
 struct CBMC_Variables
 {
