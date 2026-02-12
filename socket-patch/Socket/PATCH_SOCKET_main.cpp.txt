@@ -1,3 +1,9 @@
+PATCH_SOCKET_MAIN_READMODEL
+      if(Comp_for_DNN_Model[i].UseSocket)
+      {
+        ReadSocketModelParameters(Comp_for_DNN_Model[i]);
+      }
+
 PATCH_SOCKET_MAIN_PREP
       if(Vars.SystemComponents[a].UseSocket)
       {

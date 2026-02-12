@@ -66,6 +66,8 @@ inline bool CheckBlockedPosition(const Components& SystemComponents, size_t comp
 }
 //###PATCH_LCLIN_READDATA_H###//
 //###PATCH_ALLEGRO_READDATA_H###//
+//###PATCH_SOCKET_READDATA_H_PATCHED###//
+void ReadSocketModelParameters(Components& SystemComponents);
 
 //Weird issues with using vector.data() for double and double3//
 //So we keep this function, for now//

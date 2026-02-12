@@ -3133,6 +3133,34 @@ void ReadDNNModelSetup(Components& SystemComponents)
 
 //###PATCH_LCLIN_READDATA###//
 //###PATCH_ALLEGRO_READDATA###//
+//###PATCH_SOCKET_READDATA_PATCHED###//
+void ReadSocketModelParameters(Components& SystemComponents)
+{
+  std::vector<std::string> termsScannedLined{};
+  std::string str;
+  std::ifstream file("simulation.input");
+  bool found_name = false; bool found_drift = false;
+
+  while (std::getline(file, str))
+  {
+    if (str.find("DNNModelName", 0) != std::string::npos)
+    {
+      termsScannedLined = split(str, ' ');
+      SystemComponents.ModelName.push_back(termsScannedLined[1]);
+      found_name = true;
+    }
+    if (str.find("MaxDNNDrift", 0) != std::string::npos)
+    {
+      termsScannedLined = split(str, ' ');
+      SystemComponents.DNNDrift = std::stod(termsScannedLined[1]);
+      found_drift = true;
+    }
+  }
+  if(!found_name)  throw std::runtime_error("Model Name not found!!!!");
+  if(!found_drift) throw std::runtime_error("Drift parameter not found!!!!");
+
+  printf("DNN Model Name: %s\n", SystemComponents.ModelName[0].c_str());
+}
 
 // Read block pockets from file
 // Note: Box is not available at this point, so we read coordinates as-is
