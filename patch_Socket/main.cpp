@@ -288,7 +288,6 @@ Variables Initialize(void) //for pybind
     cudaMemcpy(Vars.Sims[a].Box.Cell, Vars.Box[a].Cell, 9 * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(Vars.Sims[a].Box.InverseCell, Vars.Box[a].InverseCell, 9 * sizeof(double), cudaMemcpyHostToDevice);
     Vars.Sims[a].Box.kmax = Vars.Box[a].kmax;
-    
     // Replicate block pockets across unit cells now that Box is fully initialized and populated
     for(size_t comp = 0; comp < Vars.SystemComponents[a].NComponents.x; comp++)
     {
@@ -297,7 +296,6 @@ Variables Initialize(void) //for pybind
         ReplicateBlockPockets(Vars.SystemComponents[a], comp, Vars.Sims[a].Box);
       }
     }
-
     Copy_Atom_data_to_device((size_t) NComponents.x, device_System, Vars.SystemComponents[a].HostSystem);
     Prepare_TempSystem_On_Host(Vars.SystemComponents[a].TempSystem);
     cudaMemcpy(Vars.Sims[a].d_a, device_System, sizeof(Atoms)*NComponents.x, cudaMemcpyHostToDevice);
@@ -314,7 +312,6 @@ Variables Initialize(void) //for pybind
       //Zhao's note: Hard-coded component here//
       //Assuming component `1` is just the 1st adsorbate species//
       std::vector<bool>ConsiderThisAdsorbateAtom(Vars.SystemComponents[a].Moleculesize[1], false);
-      Setup_Box_Temperature_Pressure(Vars.Constants, Vars.SystemComponents[a], Vars.Box[a]);
       for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
       {
         ConsiderThisAdsorbateAtom[y] = Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y];
@@ -322,7 +319,6 @@ Variables Initialize(void) //for pybind
       //Declare a new, cuda managed mem (accessible on both CPU/GPU) to overwrite the original  bool mem
       cudaMallocManaged(&Vars.SystemComponents[a].ConsiderThisAdsorbateAtom, sizeof(bool) * Vars.SystemComponents[a].Moleculesize[1]);
 
-      Setup_Box_Temperature_Pressure(Vars.Constants, Vars.SystemComponents[a], Vars.Box[a]);
       for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
       {
         Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] = ConsiderThisAdsorbateAtom[y];

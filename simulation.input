@@ -20,7 +20,7 @@ SingleSimulation yes
 DifferentFrameworks yes
 InputFileType cif
 FrameworkName calf20_ddec
-UnitCells 0 3 3 3
+UnitCells 0 1 1 1
 
 ChargeMethod Ewald
 Temperature 323
