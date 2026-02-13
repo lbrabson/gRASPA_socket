@@ -313,13 +313,11 @@ Variables Initialize(void) //for pybind
       }
       //Declare a new, cuda managed mem (accessible on both CPU/GPU) to overwrite the original  bool mem
       cudaMallocManaged(&Vars.SystemComponents[a].ConsiderThisAdsorbateAtom, sizeof(bool) * Vars.SystemComponents[a].Moleculesize[1]);
-
       for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
       {
         Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] = ConsiderThisAdsorbateAtom[y];
         printf("Atom %zu, Consider? %s\n", y, Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] ? "true" : "false");
       }
-      printf("UseSocket status: %d\n", Vars.SystemComponents[a].UseSocket);
 
       //Test reading Tensorflow model//
       //###PATCH_LCLIN_MAIN_PREP###//
