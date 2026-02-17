@@ -235,7 +235,7 @@ def main():
     calc = get_calculator(args)
 
     # 2. Create listener FIRST so gRASPA can connect
-    sock_path = f"/tmp/ipi_{args.socket}"
+    sock_path = f"/tmp/{args.socket}"
     if os.path.exists(sock_path):
         os.unlink(sock_path)
 

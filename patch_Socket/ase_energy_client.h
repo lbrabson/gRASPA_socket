@@ -34,15 +34,6 @@ struct Socket
     double cached_E_adsorbate_ev = 0.0;
     bool   cache_valid = false;
   
-    /* Destructor — clean shutdown of socket connection */
-    ~Socket()
-    {
-        if (fd >= 0) {
-            printf("Socket destructor: closing connection\n");
-            close_socket();
-        }
-    }
-
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
     {

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-02-17 — Fix socket path mismatch and destructor double-close
+
+**Summary:** Two bugs found during live testing on the cluster.
+
+### Changes
+
+1. **`ase_ipi_server_mace.py`** — Changed socket path from `/tmp/ipi_<name>` to `/tmp/<name>` to match the C++ client's hardcoded default (`/tmp/ase_ipi_socket`). The `ipi_` prefix was a leftover from ASE's SocketIOCalculator convention which we no longer use.
+
+2. **`src_clean/ase_energy_client.h`** — Removed `~Socket()` destructor. gRASPA copies `Socket` objects when `SystemComponents` vectors are resized during init, causing the destructor to close the shared `fd` on each temporary copy. This resulted in "Bad file descriptor" errors on subsequent socket calls. The OS handles fd cleanup on process exit; `close_socket()` remains available for explicit use.
+
+3. **`patch_Socket/ase_energy_client.h`** — Regenerated from `src_clean/`.
+
+---
+
 ## 2026-02-17 — Fix socket init/shutdown and startup sequencing
 
 **Summary:** `connect_socket()` was defined but never called, causing gRASPA to

@@ -183,7 +183,6 @@ struct Socket {
 
 | Method | Purpose |
 |--------|---------|
-| `~Socket()` | Destructor — calls `close_socket()` for clean shutdown |
 | `init(path, n_atoms)` | Set socket path and initial atom count |
 | `connect_socket()` | Open UNIX socket, call `do_ipi_handshake()` |
 | `send_positions(xyz)` | Full POSDATA exchange (cell + atoms) |
@@ -195,7 +194,7 @@ struct Socket {
 | `GenerateReplicaCells(alloc)` | Build 3x3x3 supercell |
 | `WrapSuperCellAtomIntoUCBox(comp)` | PBC wrapping via fractional coords |
 | `WriteSpeciesFile(path)` | Write framework/adsorbate element symbols for the Python server |
-| `close_socket()` | Send EXIT command, close fd |
+| `close_socket()` | Send EXIT command, close fd (call explicitly if needed; no destructor) |
 | `Match_Element_PseudoAtom_with_model(PA)` | Map pseudo-atoms to CHGNet elements |
 
 ### Robust I/O
@@ -302,7 +301,7 @@ DNNModelName          Socket      # identifier (not a file path for socket mode)
 
 ### Socket Path
 
-Hardcoded to `/tmp/ase_ipi_socket` in the `Socket` struct default. The Python server uses `/tmp/ipi_<socket_name>` where `<socket_name>` is passed via `--socket` flag. **These must match** (the `ipi_` prefix is added by ASE automatically).
+Hardcoded to `/tmp/ase_ipi_socket` in the `Socket` struct default. The Python server uses `/tmp/<socket_name>` where `<socket_name>` is passed via `--socket` flag. **These must match.** Pass `--socket ase_ipi_socket` to the server to use the default path.
 
 ---
 
@@ -372,7 +371,7 @@ python ase_ipi_server_mace.py --socket ase_ipi_socket --model /path/to/model.pt
 - Implements the iPI wire protocol directly (not via ASE's SocketIOCalculator)
 - Routes configurations by `natoms` to assign correct element symbols
 - Supports CUDA GPU or CPU (`--device`)
-- Socket path becomes `/tmp/ipi_ase_ipi_socket`
+- Socket path becomes `/tmp/ase_ipi_socket` (matching the C++ client default)
 
 ### Server Startup Sequence
 
@@ -401,14 +400,14 @@ The handshake (`do_handshake()`) is separated from the main serve loop (`serve()
 ### Typical Launch Script (`gcmc_mace.bash`)
 
 ```bash
-rm -f /tmp/ipi_* socket_species.txt                  # Clean old artifacts
+rm -f /tmp/ase_ipi_socket socket_species.txt          # Clean old artifacts
 python ase_ipi_server_mace.py \
     --socket ase_ipi_socket \
     --model /path/to/model.pt &                       # Start server
 sleep 10                                              # Wait for model load
 ./nvc_main.x                                          # Start gRASPA
 kill %1                                               # Stop server
-rm -f /tmp/ipi_*                                      # Cleanup
+rm -f /tmp/ase_ipi_socket                             # Cleanup
 ```
 
 ---
@@ -447,7 +446,7 @@ gRASPA side:
      h. Check drift against MaxDNNDrift
      i. Metropolis acceptance/rejection
      j. Update system state
- 13. ~Socket() destructor -> close_socket() -> sends EXIT to server
+ 13. Process exits -> OS reclaims socket fd (no destructor; Socket is copied during init)
 ```
 
 ---
@@ -463,7 +462,7 @@ gRASPA side:
 | Wrong header received | Prints unexpected header to stderr |
 | DNN drift exceeds threshold | Move rejected, event logged to `DNN/Outliers_*.data` |
 | Missing config parameters | Throws `std::runtime_error` with descriptive message |
-| Normal shutdown | `~Socket()` destructor sends EXIT command and closes fd |
+| Normal shutdown | OS reclaims fd on process exit; call `close_socket()` explicitly for a clean EXIT to the server |
 
 **Design philosophy:** Fail loudly on communication errors rather than silently producing wrong energies.
 
