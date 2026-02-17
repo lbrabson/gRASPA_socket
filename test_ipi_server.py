@@ -26,6 +26,7 @@ from ase_ipi_server_mace import (
     recv_int32,
     send_doubles,
     recv_doubles,
+    do_handshake,
     serve,
 )
 
@@ -169,6 +170,7 @@ class TestFullProtocol(unittest.TestCase):
 
         def run_server():
             try:
+                do_handshake(srv_sock, cell)
                 serve(srv_sock, calc, fw_symbols, ads_symbols, cell)
             except Exception as e:
                 errors.append(e)
@@ -263,6 +265,7 @@ class TestFullProtocol(unittest.TestCase):
 
         def run_server():
             try:
+                do_handshake(srv_sock, cell)
                 serve(srv_sock, calc, fw_symbols, ads_symbols, cell)
             except Exception as e:
                 errors.append(e)
@@ -380,6 +383,7 @@ class TestCachingBehaviour(unittest.TestCase):
 
         def run_server():
             try:
+                do_handshake(srv_sock, cell)
                 serve(srv_sock, calc, fw_symbols, ads_symbols, cell)
             except Exception as e:
                 errors.append(e)

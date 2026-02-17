@@ -125,8 +125,20 @@ def _recvall(conn, n):
 # ---------------------------------------------------------------------------
 # iPI server loop
 # ---------------------------------------------------------------------------
+def do_handshake(conn, cell_hint):
+    """Perform the iPI handshake on an accepted connection."""
+    send_header(conn, "STATUS")
+    hdr = recv_header(conn)
+    assert hdr == "NEEDINIT", f"Expected NEEDINIT, got {hdr}"
+
+    send_header(conn, "INIT")
+    send_doubles(conn, cell_hint.flatten())               # 9 doubles
+    send_doubles(conn, np.linalg.inv(cell_hint).flatten()) # 9 doubles
+    print("Handshake complete")
+
+
 def serve(conn, calc, fw_symbols, ads_symbols, cell_hint):
-    """Run the iPI protocol on an accepted connection."""
+    """Run the iPI protocol main loop (handshake must be done already)."""
 
     n_fw = len(fw_symbols)
     n_ads = len(ads_symbols)
@@ -139,17 +151,6 @@ def serve(conn, calc, fw_symbols, ads_symbols, cell_hint):
         n_ads: ads_symbols,
     }
     print(f"Expecting natoms in {{{n_total}, {n_fw}, {n_ads}}}")
-
-    # ---- Handshake ----
-    send_header(conn, "STATUS")
-    hdr = recv_header(conn)
-    assert hdr == "NEEDINIT", f"Expected NEEDINIT, got {hdr}"
-
-    # Send INIT + cell + inverse cell
-    send_header(conn, "INIT")
-    send_doubles(conn, cell_hint.flatten())               # 9 doubles
-    send_doubles(conn, np.linalg.inv(cell_hint).flatten()) # 9 doubles
-    print("Handshake complete")
 
     # ---- Main loop ----
     step = 0
@@ -233,10 +234,7 @@ def main():
     # 1. Load calculator
     calc = get_calculator(args)
 
-    # 2. Wait for species file
-    fw_symbols, ads_symbols = wait_for_species_file(args.species_file)
-
-    # 3. Create listener
+    # 2. Create listener FIRST so gRASPA can connect
     sock_path = f"/tmp/ipi_{args.socket}"
     if os.path.exists(sock_path):
         os.unlink(sock_path)
@@ -249,11 +247,23 @@ def main():
     # Dummy cell for INIT (client sends real cell with POSDATA)
     cell_hint = np.eye(3) * 10.0
 
+    fw_symbols = None
+    ads_symbols = None
+
     try:
         while True:
             print("Waiting for client connection...")
             conn, _ = srv.accept()
             print("Client connected")
+
+            # 3. Handshake first (no species info needed yet)
+            do_handshake(conn, cell_hint)
+
+            # 4. Wait for species file on first connection
+            #    (gRASPA writes it after connecting + populating ReplicaAtoms)
+            if fw_symbols is None:
+                fw_symbols, ads_symbols = wait_for_species_file(args.species_file)
+
             try:
                 serve(conn, calc, fw_symbols, ads_symbols, cell_hint)
             except (ConnectionError, BrokenPipeError) as e:

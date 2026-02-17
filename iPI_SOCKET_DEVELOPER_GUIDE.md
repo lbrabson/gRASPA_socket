@@ -183,16 +183,19 @@ struct Socket {
 
 | Method | Purpose |
 |--------|---------|
+| `~Socket()` | Destructor — calls `close_socket()` for clean shutdown |
 | `init(path, n_atoms)` | Set socket path and initial atom count |
 | `connect_socket()` | Open UNIX socket, call `do_ipi_handshake()` |
 | `send_positions(xyz)` | Full POSDATA exchange (cell + atoms) |
 | `receive_energy(energy_ev)` | Read FORCEREADY response |
-| `PredictFromSocket(xyz, n)` | Send coords, get energy back (eV) |
+| `PredictFromSocket(xyz, n)` | Send coords, get energy back (eV); auto-connects if `fd < 0` |
 | `Predict()` | Energy decomposition with caching: 3 calls on first invocation, 1 call thereafter |
 | `MCEnergyWrapper(comp, init, conv)` | Wrap + replicate + predict + unit convert |
 | `CopyAtomsFromFirstUnitcell(...)` | Extract UC atoms, filter fictional sites |
 | `GenerateReplicaCells(alloc)` | Build 3x3x3 supercell |
 | `WrapSuperCellAtomIntoUCBox(comp)` | PBC wrapping via fractional coords |
+| `WriteSpeciesFile(path)` | Write framework/adsorbate element symbols for the Python server |
+| `close_socket()` | Send EXIT command, close fd |
 | `Match_Element_PseudoAtom_with_model(PA)` | Map pseudo-atoms to CHGNet elements |
 
 ### Robust I/O
@@ -224,11 +227,15 @@ while (left > 0) {
 ### `main.cpp`
 - **Lines 119-130:** Calls `ReadDNNModelSetup()` early in init
 - **Lines 193-197:** Copies `UseSocket` flag into runtime `Components`
-- **Lines 332-380 (patched):** Full socket setup:
+- **Lines 332-392 (patched):** Full socket setup:
   - Match elements to pseudo-atoms
   - Copy framework + adsorbate atoms into `UCAtoms`
   - Set `NReplicacell = {3,3,3}`
-  - Run two test energy evaluations (one at initial position, one displaced by (1,1,1))
+  - `WrapSuperCellAtomIntoUCBox()` + `GenerateReplicaCells(true)` — populate ReplicaAtoms (no socket needed)
+  - `WriteSpeciesFile("socket_species.txt")` — server reads this after handshake
+  - `connect_socket()` — connect and complete iPI handshake
+  - First test `Predict()` call (ReplicaAtoms already populated)
+  - Second test with displaced atoms via `MCEnergyWrapper(1, false, ...)`
 
 ### `DNN_HostGuest_Energy_Functions.h`
 All MC move types are handled:
@@ -355,31 +362,53 @@ The socket implementation builds a supercell before sending coordinates to the M
 
 ## 11. Python Server
 
-**File:** `ase_ipi_server_claude.py`
+**File:** `ase_ipi_server_mace.py`
 
 ```bash
-# UNIX socket (recommended for local use)
-python ase_ipi_server_claude.py --socket ase_ipi_socket
-
-# INET socket (for remote use)
-python ase_ipi_server_claude.py --port 31415
+python ase_ipi_server_mace.py --socket ase_ipi_socket --model /path/to/model.pt
 ```
 
-- Loads CHGNet v0.3.0 (412,525 parameters)
-- Wraps it in ASE's `SocketIOCalculator` which handles the iPI protocol server side
-- Supports CUDA GPU or CPU
-- Stays alive accepting multiple evaluations until killed
-- Socket path becomes `/tmp/ipi_ase_ipi_socket` (ASE prepends `ipi_`)
+- Loads a MACE ML potential (or other ASE-compatible calculator)
+- Implements the iPI wire protocol directly (not via ASE's SocketIOCalculator)
+- Routes configurations by `natoms` to assign correct element symbols
+- Supports CUDA GPU or CPU (`--device`)
+- Socket path becomes `/tmp/ipi_ase_ipi_socket`
 
-### Typical Launch Script (`gcmc_claude.bash`)
+### Server Startup Sequence
+
+The server startup is carefully sequenced to avoid deadlocks with gRASPA:
+
+```
+1. Load ML model
+2. Bind + listen on UNIX socket          (socket file now exists)
+3. Accept connection from gRASPA
+4. do_handshake()                        (STATUS → NEEDINIT → INIT)
+5. wait_for_species_file()               (gRASPA writes this after connecting)
+6. serve() main loop                     (STATUS → READY → POSDATA → ...)
+```
+
+The handshake (`do_handshake()`) is separated from the main serve loop (`serve()`) so the server can complete the handshake before needing species info. On reconnection, the species data is already loaded.
+
+### Key Functions
+
+| Function | Purpose |
+|----------|---------|
+| `do_handshake(conn, cell)` | Perform iPI handshake (STATUS/NEEDINIT/INIT) |
+| `serve(conn, calc, fw, ads, cell)` | Main protocol loop (handshake must be done already) |
+| `parse_species_file(path)` | Parse `socket_species.txt` → `(fw_symbols, ads_symbols)` |
+| `wait_for_species_file(path)` | Poll until species file exists and is non-empty |
+
+### Typical Launch Script (`gcmc_mace.bash`)
 
 ```bash
-rm -f /tmp/ipi_*                                    # Clean old sockets
-python ase_ipi_server_claude.py --socket ase_ipi_socket &  # Start server
-sleep 20                                             # Wait for CHGNet load
-./gRASPA                                             # Start simulation
-kill %1                                              # Stop server
-rm -f /tmp/ipi_*                                     # Cleanup
+rm -f /tmp/ipi_* socket_species.txt                  # Clean old artifacts
+python ase_ipi_server_mace.py \
+    --socket ase_ipi_socket \
+    --model /path/to/model.pt &                       # Start server
+sleep 10                                              # Wait for model load
+./nvc_main.x                                          # Start gRASPA
+kill %1                                               # Stop server
+rm -f /tmp/ipi_*                                      # Cleanup
 ```
 
 ---
@@ -387,25 +416,38 @@ rm -f /tmp/ipi_*                                     # Cleanup
 ## 12. Runtime Workflow
 
 ```
-1. Parse simulation.input -> UseSocket = true, DNNEnergyConversion = 9648.53...
-2. ReadSocketModelParameters() -> DNNModelName, MaxDNNDrift
-3. Match pseudo-atoms to element symbols
-4. Copy framework atoms into DNN.UCAtoms[0]
-5. Copy adsorbate template into DNN.UCAtoms[1]
-6. Set NReplicacell = {3,3,3}
-7. Run test MCEnergyWrapper() with Initialize=true  (first socket connection here)
-8. Run test with displaced atoms to verify connection
-9. Begin MC simulation loop:
-   a. Select MC move type
-   b. Generate trial configuration (GPU)
-   c. cudaMemcpy trial positions to host
-   d. Filter atoms via ConsiderThisAdsorbateAtom[]
-   e. Copy to DNN.UCAtoms
-   f. MCEnergyWrapper() -> Wrap -> Replicate -> Predict() -> 1 socket call (3 on first invocation)
-   g. Convert eV -> 10J/mol
-   h. Check drift against MaxDNNDrift
-   i. Metropolis acceptance/rejection
-   j. Update system state
+Server side:
+  S1. Load ML model
+  S2. Bind + listen on /tmp/ipi_ase_ipi_socket
+  S3. Accept connection (blocks until gRASPA connects at step 8)
+  S4. do_handshake() — STATUS → NEEDINIT → INIT
+  S5. wait_for_species_file() — polls until gRASPA writes it (step 7)
+  S6. serve() main loop — handles POSDATA requests
+
+gRASPA side:
+  1. Parse simulation.input -> UseSocket = true, DNNEnergyConversion = 9648.53...
+  2. ReadSocketModelParameters() -> DNNModelName, MaxDNNDrift
+  3. Match pseudo-atoms to element symbols
+  4. Copy framework atoms into DNN.UCAtoms[0]
+  5. Copy adsorbate template into DNN.UCAtoms[1]
+  6. Set NReplicacell = {3,3,3}
+  7. WrapSuperCellAtomIntoUCBox + GenerateReplicaCells(true) -> populate ReplicaAtoms
+  8. WriteSpeciesFile("socket_species.txt") -> server can now read species
+  9. connect_socket() -> handshake with server (server at step S4)
+ 10. First test Predict() call (ReplicaAtoms already set up)
+ 11. Second test with displaced atoms via MCEnergyWrapper(1, false, ...)
+ 12. Begin MC simulation loop:
+     a. Select MC move type
+     b. Generate trial configuration (GPU)
+     c. cudaMemcpy trial positions to host
+     d. Filter atoms via ConsiderThisAdsorbateAtom[]
+     e. Copy to DNN.UCAtoms
+     f. MCEnergyWrapper() -> Wrap -> Replicate -> Predict() -> 1 socket call
+     g. Convert eV -> 10J/mol
+     h. Check drift against MaxDNNDrift
+     i. Metropolis acceptance/rejection
+     j. Update system state
+ 13. ~Socket() destructor -> close_socket() -> sends EXIT to server
 ```
 
 ---
@@ -415,11 +457,13 @@ rm -f /tmp/ipi_*                                     # Cleanup
 | Scenario | Behavior |
 |----------|----------|
 | Socket connection fails | Returns -1, prints `perror()` |
+| `PredictFromSocket` called with `fd < 0` | Auto-connects via `connect_socket()`; exits fatally if that fails |
 | Server closes socket mid-transfer | Prints `"SOCKET CLOSED BY ASE"`, calls `exit(EXIT_FAILURE)` |
 | Read/write returns partial data | Retries in loop until all bytes transferred |
 | Wrong header received | Prints unexpected header to stderr |
 | DNN drift exceeds threshold | Move rejected, event logged to `DNN/Outliers_*.data` |
 | Missing config parameters | Throws `std::runtime_error` with descriptive message |
+| Normal shutdown | `~Socket()` destructor sends EXIT command and closes fd |
 
 **Design philosophy:** Fail loudly on communication errors rather than silently producing wrong energies.
 
@@ -427,11 +471,11 @@ rm -f /tmp/ipi_*                                     # Cleanup
 
 ## 14. Known Limitations
 
-1. **One socket call per energy evaluation** (after first call caches framework/adsorbate energies) - the first `Predict()` still requires 3 calls
-2. **Synchronous/blocking I/O** - no pipelining or async evaluation
-3. **Socket path hardcoded** - changing requires source modification and recompilation
-4. **Single socket connection** - one ML server per simulation
-5. **Rigid framework only** - `main.cpp` throws if framework is not rigid or has multiple components
-6. **Component 1 assumption** - adsorbate is always component index 1 in several places
-7. **Forces/virial unused** - read from server for protocol compliance but discarded
-8. **No reconnection logic** - if the server dies, the simulation terminates immediately
+1. **One socket call per energy evaluation** (after first call caches framework/adsorbate energies) — the first `Predict()` still requires 3 calls
+2. **Synchronous/blocking I/O** — no pipelining or async evaluation
+3. **Socket path hardcoded** — changing requires source modification and recompilation
+4. **Single socket connection** — one ML server per simulation
+5. **Rigid framework only** — `main.cpp` throws if framework is not rigid or has multiple components
+6. **Component 1 assumption** — adsorbate is always component index 1 in several places
+7. **Forces/virial unused** — read from server for protocol compliance but discarded
+8. **Server reconnection** — the server accepts new connections after a client disconnects, but the C++ client has no reconnect logic (if the server dies mid-simulation, gRASPA terminates)

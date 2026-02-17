@@ -34,6 +34,15 @@ struct Socket
     double cached_E_adsorbate_ev = 0.0;
     bool   cache_valid = false;
   
+    /* Destructor — clean shutdown of socket connection */
+    ~Socket()
+    {
+        if (fd >= 0) {
+            printf("Socket destructor: closing connection\n");
+            close_socket();
+        }
+    }
+
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
     {
@@ -302,6 +311,14 @@ struct Socket
     /* Send coords and receive single energy */
     double PredictFromSocket(const double* xyz, size_t n_atoms)
     {
+        if (fd < 0) {
+            fprintf(stderr, "Socket not connected — attempting auto-connect\n");
+            if (connect_socket() < 0) {
+                fprintf(stderr, "FATAL: Cannot connect to ML server\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
         natoms = n_atoms;   // update current atom count for socket
 
         // debugging by printing positions

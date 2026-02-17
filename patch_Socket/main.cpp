@@ -365,19 +365,30 @@ Variables Initialize(void) //for pybind
         printf("DONE Setting Test Adsorbate positions\n");
 
         Vars.SystemComponents[a].DNN.NReplicacell = {3,3,3}; //Default//
-        bool Initialize = true;
 
-        double DNN_E = Vars.SystemComponents[a].DNN.MCEnergyWrapper(1, Initialize, Vars.SystemComponents[a].DNNEnergyConversion);
-        printf("%s, sum (from Unitcell values): %f\n", Initialize ? "Initialize Model": "Re-using Model", DNN_E);
+        // Populate ReplicaAtoms BEFORE connecting (no socket needed for this)
+        Vars.SystemComponents[a].DNN.WrapSuperCellAtomIntoUCBox(comp);
+        Vars.SystemComponents[a].DNN.GenerateReplicaCells(true);
+        printf("Generated replica cells for species file\n");
+
+        // Write species file so the server can read it after handshake
         Vars.SystemComponents[a].DNN.WriteSpeciesFile("socket_species.txt");
-        //DO another position for the test molecules//
+
+        // NOW connect to the server (server will read species file after handshake)
+        if(Vars.SystemComponents[a].DNN.connect_socket() < 0)
+          throw std::runtime_error("Failed to connect to ML server socket");
+
+        // First test energy evaluation (ReplicaAtoms already populated)
+        double DNN_E = Vars.SystemComponents[a].DNN.Predict() * Vars.SystemComponents[a].DNNEnergyConversion;
+        printf("Initialize Model, sum (from Unitcell values): %f\n", DNN_E);
+
+        // Second test with displaced atoms
         double3 d_val = {1.0, 1.0, 1.0};
         for(size_t i = 0; i < Vars.SystemComponents[a].DNN.UCAtoms[comp].size; i++)
           Vars.SystemComponents[a].DNN.UCAtoms[comp].pos[i] += d_val;
 
-        Initialize = false;
-        DNN_E = Vars.SystemComponents[a].DNN.MCEnergyWrapper(1, Initialize, Vars.SystemComponents[a].DNNEnergyConversion);
-        printf("%s, sum (from Unitcell values): %f\n", Initialize ? "Initialize Model": "Re-using Model", DNN_E);
+        DNN_E = Vars.SystemComponents[a].DNN.MCEnergyWrapper(1, false, Vars.SystemComponents[a].DNNEnergyConversion);
+        printf("Re-using Model, sum (from Unitcell values): %f\n", DNN_E);
       }
     }
     //Prepare detailed Identity Swap statistics if there are more than 1 component//
