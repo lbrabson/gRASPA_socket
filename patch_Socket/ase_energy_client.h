@@ -28,6 +28,11 @@ struct Socket
     size_t nstep = 0;
 
     bool handshake_done = false;
+
+    // Cache for framework and adsorbate energies (constant across MC moves)
+    double cached_E_framework_ev = 0.0;
+    double cached_E_adsorbate_ev = 0.0;
+    bool   cache_valid = false;
   
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
@@ -316,6 +321,44 @@ struct Socket
         return energy_ev;
     }
 
+    void WriteSpeciesFile(std::string path)
+    {
+        FILE* fp = fopen(path.c_str(), "w");
+        if (!fp) {
+            fprintf(stderr, "ERROR: Cannot open %s for writing\n", path.c_str());
+            return;
+        }
+
+        // Framework (component 0)
+        fprintf(fp, "FRAMEWORK %zu\n", ReplicaAtoms[0].size);
+        for (size_t i = 0; i < ReplicaAtoms[0].size; i++) {
+            size_t t = ReplicaAtoms[0].Type[i];
+            fprintf(fp, "%s", ElementSymbolUsed[t].c_str());
+            if (i + 1 < ReplicaAtoms[0].size) fprintf(fp, " ");
+        }
+        fprintf(fp, "\n");
+
+        // Adsorbate (components 1..N)
+        size_t n_ads = 0;
+        for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
+            n_ads += ReplicaAtoms[comp].size;
+
+        fprintf(fp, "ADSORBATE %zu\n", n_ads);
+        size_t printed = 0;
+        for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
+            for (size_t i = 0; i < ReplicaAtoms[comp].size; i++) {
+                size_t t = ReplicaAtoms[comp].Type[i];
+                fprintf(fp, "%s", ElementSymbolUsed[t].c_str());
+                printed++;
+                if (printed < n_ads) fprintf(fp, " ");
+            }
+        fprintf(fp, "\n");
+
+        fclose(fp);
+        printf("Wrote species file: %s (fw=%zu, ads=%zu)\n",
+               path.c_str(), ReplicaAtoms[0].size, n_ads);
+    }
+
     /* Full evaluation of host-guest interactions */
     double Predict()
     {
@@ -328,12 +371,8 @@ struct Socket
         size_t n_total = n_framework + n_adsorbate;
 
         static std::vector<double> xyz_total;
-        static std::vector<double> xyz_framework;
-        static std::vector<double> xyz_adsorbate;
 
         xyz_total.resize(3 * n_total);
-        xyz_framework.resize(3 * n_framework);
-        xyz_adsorbate.resize(3 * n_adsorbate);
 
         size_t counter = 0;
         for (size_t comp = 0; comp < ReplicaAtoms.size(); comp++)
@@ -345,32 +384,50 @@ struct Socket
             counter++;
         }
 
-        for (size_t i = 0; i < n_framework; i++)
+        double E_total_ev = PredictFromSocket(xyz_total.data(), n_total);
+
+        if (!cache_valid)
         {
-            xyz_framework[3*i + 0] = ReplicaAtoms[0].pos[i].x;
-            xyz_framework[3*i + 1] = ReplicaAtoms[0].pos[i].y;
-            xyz_framework[3*i + 2] = ReplicaAtoms[0].pos[i].z;
+            // First call: compute and cache framework and adsorbate energies
+            static std::vector<double> xyz_framework;
+            static std::vector<double> xyz_adsorbate;
+
+            xyz_framework.resize(3 * n_framework);
+            xyz_adsorbate.resize(3 * n_adsorbate);
+
+            for (size_t i = 0; i < n_framework; i++)
+            {
+                xyz_framework[3*i + 0] = ReplicaAtoms[0].pos[i].x;
+                xyz_framework[3*i + 1] = ReplicaAtoms[0].pos[i].y;
+                xyz_framework[3*i + 2] = ReplicaAtoms[0].pos[i].z;
+            }
+
+            counter = 0;
+            for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
+            for (size_t i = 0; i < ReplicaAtoms[comp].size; i++)
+            {
+                xyz_adsorbate[3*counter + 0] = ReplicaAtoms[comp].pos[i].x;
+                xyz_adsorbate[3*counter + 1] = ReplicaAtoms[comp].pos[i].y;
+                xyz_adsorbate[3*counter + 2] = ReplicaAtoms[comp].pos[i].z;
+                counter++;
+            }
+
+            cached_E_framework_ev = PredictFromSocket(xyz_framework.data(), n_framework);
+            cached_E_adsorbate_ev = PredictFromSocket(xyz_adsorbate.data(), n_adsorbate);
+            cache_valid = true;
+
+            std::cout << "ML E_total_ev     = " << E_total_ev           << " eV (computed)" << std::endl;
+            std::cout << "ML E_framework_ev = " << cached_E_framework_ev << " eV (computed, cached)" << std::endl;
+            std::cout << "ML E_adsorbate_ev = " << cached_E_adsorbate_ev << " eV (computed, cached)" << std::endl;
+        }
+        else
+        {
+            std::cout << "ML E_total_ev     = " << E_total_ev           << " eV (computed)" << std::endl;
+            std::cout << "ML E_framework_ev = " << cached_E_framework_ev << " eV (cached)" << std::endl;
+            std::cout << "ML E_adsorbate_ev = " << cached_E_adsorbate_ev << " eV (cached)" << std::endl;
         }
 
-        counter = 0;
-        for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
-        for (size_t i = 0; i < ReplicaAtoms[comp].size; i++)
-        {
-            xyz_adsorbate[3*counter + 0] = ReplicaAtoms[comp].pos[i].x;
-            xyz_adsorbate[3*counter + 1] = ReplicaAtoms[comp].pos[i].y;
-            xyz_adsorbate[3*counter + 2] = ReplicaAtoms[comp].pos[i].z;
-            counter++;
-        }
-
-        double E_total_ev     = PredictFromSocket(xyz_total.data(), n_total);
-        double E_framework_ev = PredictFromSocket(xyz_framework.data(), n_framework);
-        double E_adsorbate_ev = PredictFromSocket(xyz_adsorbate.data(), n_adsorbate);
-
-        std::cout << "ML E_total_ev     = " << E_total_ev     << " eV" << std::endl;
-        std::cout << "ML E_framework_ev = " << E_framework_ev << " eV" << std::endl;
-        std::cout << "ML E_adsorbate_ev = " << E_adsorbate_ev << " eV" << std::endl;
-
-        return E_total_ev - E_framework_ev - E_adsorbate_ev;
+        return E_total_ev - cached_E_framework_ev - cached_E_adsorbate_ev;
     }
 
     /* Clean shutdown */

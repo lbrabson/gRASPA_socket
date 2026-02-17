@@ -323,7 +323,6 @@ Variables Initialize(void) //for pybind
         Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] = ConsiderThisAdsorbateAtom[y];
         printf("Atom %zu, Consider? %s\n", y, Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] ? "true" : "false");
       }
-      //printf("UseSocket status: %d\n", Vars.SystemComponents[a].UseSocket);
 
       //Test reading Tensorflow model//
       //###PATCH_LCLIN_MAIN_PREP###//
@@ -334,6 +333,7 @@ Variables Initialize(void) //for pybind
         printf("Setting up Socket model\n");
         //Vars.SystemComponents[a].DNN.ReadModel(Vars.SystemComponents[a].ModelName[0]);
         printf("DONE Reading the model, model name %s\n", Vars.SystemComponents[a].ModelName[0].c_str());
+        Vars.SystemComponents[a].DNN.ElementSymbolUsed = Vars.SystemComponents[a].PseudoAtoms.UniqueSymbol;
         Vars.SystemComponents[a].DNN.Match_Element_PseudoAtom_with_model(Vars.SystemComponents[a].PseudoAtoms);
 
         Vars.SystemComponents[a].DNN.UCAtoms.resize(Vars.SystemComponents[a].NComponents.x);
@@ -369,6 +369,7 @@ Variables Initialize(void) //for pybind
 
         double DNN_E = Vars.SystemComponents[a].DNN.MCEnergyWrapper(1, Initialize, Vars.SystemComponents[a].DNNEnergyConversion);
         printf("%s, sum (from Unitcell values): %f\n", Initialize ? "Initialize Model": "Re-using Model", DNN_E);
+        Vars.SystemComponents[a].DNN.WriteSpeciesFile("socket_species.txt");
         //DO another position for the test molecules//
         double3 d_val = {1.0, 1.0, 1.0};
         for(size_t i = 0; i < Vars.SystemComponents[a].DNN.UCAtoms[comp].size; i++)
