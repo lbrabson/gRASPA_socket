@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-02-18 — Fix GPU startup race condition and socket path inconsistency
+
+**Summary:** gRASPA failed to connect to the MACE server with "Connection refused"
+when running on GPU. Three bugs combined to cause this.
+
+### Changes
+
+1. **`ase_ipi_server_mace.py`** — Moved socket `bind()`+`listen()` to before
+   `get_calculator()`. Previously the model was loaded first, then the socket was
+   created — on GPU this means `torch.load()` holds up socket creation for 30+
+   seconds while gRASPA is already trying to connect. The OS now queues gRASPA's
+   connection in the listen backlog while the model loads.
+
+2. **`gcmc_mace.bash`** — Replaced `sleep 1` with a poll loop that waits up to
+   300 seconds for the socket file to appear (`[ -S "${SOCKET_PATH}" ]`), so
+   gRASPA is never launched until the server is provably ready regardless of model
+   load time.
+
+3. **`gcmc_mace.bash`** — Fixed stale `ipi_` prefix in socket path. The old
+   script cleaned up and polled `/tmp/ipi_ase_ipi_socket` while the Python server
+   and C++ client both use `/tmp/ase_ipi_socket`. Introduced `SOCKET_PATH`
+   variable derived consistently from `SOCKET_NAME`. Also corrected `--device`
+   flag from `cpu` to `cuda` for GPU runs.
+
+---
+
 ## 2026-02-17 — Fix socket path mismatch and destructor double-close
 
 **Summary:** Two bugs found during live testing on the cluster.

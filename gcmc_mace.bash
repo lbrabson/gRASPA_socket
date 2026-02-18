@@ -12,19 +12,33 @@ MODEL="${1:-/path/to/mace_model.pt}"
 SOCKET_NAME="ase_ipi_socket"
 SPECIES_FILE="socket_species.txt"
 
+SOCKET_PATH="/tmp/${SOCKET_NAME}"
+
 # Clean up from previous runs
-rm -f "/tmp/ipi_${SOCKET_NAME}" "${SPECIES_FILE}"
+rm -f "${SOCKET_PATH}" "${SPECIES_FILE}"
 
 echo "Starting MACE iPI server (model: ${MODEL})..."
 python ase_ipi_server_mace.py \
     --socket "${SOCKET_NAME}" \
     --model "${MODEL}" \
     --species-file "${SPECIES_FILE}" \
-    --device cpu &
+    --device cuda &
 SERVER_PID=$!
 
-# Give the server a moment to start polling
-sleep 1
+# Wait until the server has created the socket file before launching gRASPA.
+# Model loading (especially on GPU) can take much longer than a fixed sleep.
+echo "Waiting for server socket: ${SOCKET_PATH} ..."
+WAIT=0
+until [ -S "${SOCKET_PATH}" ] || [ "${WAIT}" -ge 300 ]; do
+    sleep 1
+    WAIT=$((WAIT + 1))
+done
+if [ ! -S "${SOCKET_PATH}" ]; then
+    echo "ERROR: server socket did not appear after ${WAIT}s — aborting"
+    kill "${SERVER_PID}" 2>/dev/null || true
+    exit 1
+fi
+echo "Server socket ready after ${WAIT}s."
 
 echo "Starting gRASPA..."
 ./nvc_main.x   # writes socket_species.txt during init, then connects
@@ -34,5 +48,5 @@ kill "${SERVER_PID}" 2>/dev/null || true
 wait "${SERVER_PID}" 2>/dev/null || true
 
 # Cleanup
-rm -f "/tmp/ipi_${SOCKET_NAME}" "${SPECIES_FILE}"
+rm -f "${SOCKET_PATH}" "${SPECIES_FILE}"
 echo "Done."
