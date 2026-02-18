@@ -231,8 +231,12 @@ def main():
     print("gRASPA iPI Server (custom protocol)")
     print("=" * 60)
 
-    # 1. Create listener FIRST so gRASPA can connect while the model loads.
-    #    The OS will queue the incoming connection (backlog=1) until we accept().
+    # 1. Load calculator first.  The socket is created only after the model is
+    #    fully on the GPU so that gRASPA (and its CUDA allocations) never starts
+    #    while torch.load is competing for GPU memory.
+    calc = get_calculator(args)
+
+    # 2. Create listener so gRASPA can connect.
     sock_path = f"/tmp/{args.socket}"
     if os.path.exists(sock_path):
         os.unlink(sock_path)
@@ -240,10 +244,7 @@ def main():
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
     srv.listen(1)
-    print(f"Listening on {sock_path} (model loading may take a moment...)")
-
-    # 2. Load calculator (may be slow on GPU; socket is already ready)
-    calc = get_calculator(args)
+    print(f"Listening on {sock_path}")
 
     # Dummy cell for INIT (client sends real cell with POSDATA)
     cell_hint = np.eye(3) * 10.0

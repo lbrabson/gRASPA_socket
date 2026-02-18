@@ -2,27 +2,45 @@
 
 ## 2026-02-18 — Fix GPU startup race condition and socket path inconsistency
 
-**Summary:** gRASPA failed to connect to the MACE server with "Connection refused"
-when running on GPU. Three bugs combined to cause this.
+**Summary:** gRASPA failed with "Connection refused" on the first run, and with
+a segfault on the second. The root cause in both cases was a timing mismatch
+between the Python server startup and gRASPA launch.
+
+### Root cause
+
+`gcmc_mace.bash` used a fixed `sleep 1` before launching gRASPA. On GPU,
+`torch.load` of the MACE model takes 30–60+ seconds. This caused two failure
+modes depending on ordering:
+
+- **"Connection refused"**: gRASPA tried to connect before the server had even
+  created the socket.
+- **Segfault**: if the socket is created before model loading completes, gRASPA
+  launches while `torch.load` is still occupying the GPU. gRASPA's own CUDA
+  allocations then race against the model load for GPU memory, causing a CUDA
+  fault that manifests as SIGSEGV.
+
+The safe invariant is: **gRASPA must not start until the MACE model is fully
+resident on the GPU.** This is guaranteed by keeping the original server order
+(load model → create socket) and having the bash script poll for the socket file
+rather than sleeping a fixed amount.
 
 ### Changes
 
-1. **`ase_ipi_server_mace.py`** — Moved socket `bind()`+`listen()` to before
-   `get_calculator()`. Previously the model was loaded first, then the socket was
-   created — on GPU this means `torch.load()` holds up socket creation for 30+
-   seconds while gRASPA is already trying to connect. The OS now queues gRASPA's
-   connection in the listen backlog while the model loads.
+1. **`ase_ipi_server_mace.py`** — Restored original ordering: `get_calculator()`
+   runs before `bind()`+`listen()`. The socket file therefore appears only after
+   the model is fully loaded, so gRASPA never launches while the GPU is busy with
+   `torch.load`.
 
-2. **`gcmc_mace.bash`** — Replaced `sleep 1` with a poll loop that waits up to
-   300 seconds for the socket file to appear (`[ -S "${SOCKET_PATH}" ]`), so
-   gRASPA is never launched until the server is provably ready regardless of model
-   load time.
+2. **`gcmc_mace.bash`** — Replaced `sleep 1` with a poll loop (`until [ -S
+   "${SOCKET_PATH}" ]`) that waits up to 300 seconds for the socket file to
+   appear. gRASPA is launched only once the socket exists, which implies the
+   model is loaded and the server is ready to accept.
 
 3. **`gcmc_mace.bash`** — Fixed stale `ipi_` prefix in socket path. The old
    script cleaned up and polled `/tmp/ipi_ase_ipi_socket` while the Python server
-   and C++ client both use `/tmp/ase_ipi_socket`. Introduced `SOCKET_PATH`
+   and C++ client both use `/tmp/ase_ipi_socket`. Introduced a `SOCKET_PATH`
    variable derived consistently from `SOCKET_NAME`. Also corrected `--device`
-   flag from `cpu` to `cuda` for GPU runs.
+   from `cpu` to `cuda` for GPU runs.
 
 ---
 
