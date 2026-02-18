@@ -307,9 +307,17 @@ Variables Initialize(void) //for pybind
       //Zhao's note: Hard-coded component here//
       //Assuming component `1` is just the 1st adsorbate species//
       std::vector<bool>ConsiderThisAdsorbateAtom(Vars.SystemComponents[a].Moleculesize[1], false);
-      for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
+      if(Vars.SystemComponents[a].ConsiderThisAdsorbateAtom != nullptr)
       {
-        ConsiderThisAdsorbateAtom[y] = Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y];
+        // DNNPseudoAtoms was specified — copy the existing CPU-malloc'd flags
+        for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
+          ConsiderThisAdsorbateAtom[y] = Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y];
+      }
+      else
+      {
+        // No DNNPseudoAtoms keyword — default: pass all adsorbate atoms to the model
+        for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
+          ConsiderThisAdsorbateAtom[y] = true;
       }
       //Declare a new, cuda managed mem (accessible on both CPU/GPU) to overwrite the original  bool mem
       cudaMallocManaged(&Vars.SystemComponents[a].ConsiderThisAdsorbateAtom, sizeof(bool) * Vars.SystemComponents[a].Moleculesize[1]);
