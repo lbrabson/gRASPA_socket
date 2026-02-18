@@ -15,18 +15,21 @@
 12. [Runtime Workflow](#runtime-workflow)
 13. [Error Handling](#error-handling)
 14. [Known Limitations](#known-limitations)
+15. [Energy Validation](#energy-validation)
 
 ---
 
 ## 1. Overview
 
-gRASPA uses an **i-PI socket protocol** to offload host-guest interaction energy calculations to an external machine-learning server (CHGNet via ASE). The C++ simulation engine acts as a **socket client**, sending atomic configurations over a UNIX domain socket and receiving predicted energies. This replaces (or supplements) classical force-field host-guest energy during Monte Carlo moves.
+gRASPA uses an **i-PI socket protocol** to offload host-guest interaction energy calculations to an external machine-learning server (MACE via ASE). The C++ simulation engine acts as a **socket client**, sending atomic configurations over a UNIX domain socket and receiving predicted energies. This replaces (or supplements) classical force-field host-guest energy during Monte Carlo moves.
 
 **Key design choice:** The energy is decomposed as:
 ```
 E_interaction = E_total(framework+adsorbate) - E_framework - E_adsorbate
 ```
 E_framework and E_adsorbate are **cached after the first evaluation** (both are constant for a rigid framework + replicated rigid molecule), so subsequent calls require only **1 socket round-trip** for E_total.
+
+**Energy validation:** An optional validation dump writes every MACE-call configuration to an extended-XYZ file so that `validate_energies.py` can re-run MACE independently and confirm that gRASPA is passing the correct structures and energies to the ML potential. See [Section 15](#energy-validation).
 
 ---
 
@@ -169,13 +172,25 @@ struct Socket {
     int fd = -1;                                // File descriptor
     size_t natoms = 0;
     size_t DNN_Molsize = 0;                     // Atoms per adsorbate (excluding fictional)
-    size_t nstep = 0;
+    size_t nstep = 0;                           // Total Predict() calls (for periodic log)
     bool handshake_done = false;
 
     // Energy caching (framework & adsorbate are constant across MC moves)
     double cached_E_framework_ev = 0.0;
     double cached_E_adsorbate_ev = 0.0;
     bool   cache_valid = false;
+
+    // Cached xyz arrays for the framework and isolated adsorbate (set on first Predict())
+    // Kept as members so DumpValidationFrame() can access them without recomputing.
+    std::vector<double> cached_xyz_framework;
+    std::vector<double> cached_xyz_adsorbate;
+
+    // Validation dump: records every MACE call to an extended-XYZ file
+    bool   validation_mode  = false;            // Enabled via ValidationMode=yes
+    size_t validation_max   = 100;              // Max frames (ValidationMaxFrames)
+    size_t validation_count = 0;               // Frames written so far
+    FILE*  validation_fp    = nullptr;          // Output file handle
+    int    current_move_type = -1;              // Set by caller before MCEnergyWrapper()
 };
 ```
 
@@ -188,14 +203,16 @@ struct Socket {
 | `send_positions(xyz)` | Full POSDATA exchange (cell + atoms) |
 | `receive_energy(energy_ev)` | Read FORCEREADY response |
 | `PredictFromSocket(xyz, n)` | Send coords, get energy back (eV); auto-connects if `fd < 0` |
-| `Predict()` | Energy decomposition with caching: 3 calls on first invocation, 1 call thereafter |
+| `Predict()` | Energy decomposition with caching: 3 calls on first invocation, 1 call thereafter. Fires unit validation log on first call; per-1000-step summary every 1000 calls; calls `DumpValidationFrame()` when validation is active |
 | `MCEnergyWrapper(comp, init, conv)` | Wrap + replicate + predict + unit convert |
 | `CopyAtomsFromFirstUnitcell(...)` | Extract UC atoms, filter fictional sites |
 | `GenerateReplicaCells(alloc)` | Build 3x3x3 supercell |
 | `WrapSuperCellAtomIntoUCBox(comp)` | PBC wrapping via fractional coords |
 | `WriteSpeciesFile(path)` | Write framework/adsorbate element symbols for the Python server |
-| `close_socket()` | Send EXIT command, close fd (call explicitly if needed; no destructor) |
-| `Match_Element_PseudoAtom_with_model(PA)` | Map pseudo-atoms to CHGNet elements |
+| `OpenValidationFile(path)` | Open the extended-XYZ validation dump file; call after `connect_socket()` when `validation_mode=true` |
+| `DumpValidationFrame(xyz, n, E_total_ev, move_type)` | Append one extended-XYZ frame to the validation dump, including all energy components and `N_FW` |
+| `close_socket()` | Send EXIT command, close fd and validation file (call explicitly; no destructor) |
+| `Match_Element_PseudoAtom_with_model(PA)` | Map pseudo-atoms to MACE element symbols |
 
 ### Robust I/O
 
@@ -222,6 +239,9 @@ while (left > 0) {
 - **Lines 3100-3103:** Parses `DNN_Method Socket` from `simulation.input` → sets `UseSocket = true`
 - **Lines 3107-3122:** Parses `DNNEnergyUnit` → sets conversion factor
 - **Lines 3137+:** `ReadSocketModelParameters()` reads `DNNModelName` and `MaxDNNDrift`
+- Parses two optional validation keywords:
+  - `ValidationMode yes|true` → sets `DNN.validation_mode = true`
+  - `ValidationMaxFrames <N>` → sets `DNN.validation_max = N` (default 100)
 
 ### `main.cpp`
 - **Lines 119-130:** Calls `ReadDNNModelSetup()` early in init
@@ -233,20 +253,23 @@ while (left > 0) {
   - `WrapSuperCellAtomIntoUCBox()` + `GenerateReplicaCells(true)` — populate ReplicaAtoms (no socket needed)
   - `WriteSpeciesFile("socket_species.txt")` — server reads this after handshake
   - `connect_socket()` — connect and complete iPI handshake
+  - If `validation_mode`: `OpenValidationFile("validation_dump_box<N>.xyz")`
   - First test `Predict()` call (ReplicaAtoms already populated)
   - Second test with displaced atoms via `MCEnergyWrapper(1, false, ...)`
 
 ### `DNN_HostGuest_Energy_Functions.h`
-All MC move types are handled:
+All MC move types are handled. **Before each `MCEnergyWrapper()` call,
+`SystemComponents.DNN.current_move_type` is set** so that the validation dump
+records the correct MC move label for every configuration.
 
 | Move Type | Patch Name | What it does |
 |-----------|-----------|--------------|
-| INSERTION | `PATCH_SOCKET_INSERTION` | `cudaMemcpy` trial pos → filter → `MCEnergyWrapper()` |
-| DELETION | `PATCH_SOCKET_DELETION` | Same flow for deletion candidate |
-| TRANSLATION/ROTATION | `PATCH_SOCKET_SINGLE` | Evaluate both old & new pos, return `E_new - E_old` |
-| SINGLE_INSERTION | `PATCH_SOCKET_SINGLE` | Only evaluates new (skips old) |
-| SINGLE_DELETION | `PATCH_SOCKET_SINGLE` | Only evaluates old (skips new) |
-| REINSERTION | `PATCH_SOCKET_REINSERTION` | Evaluate trial + original, return delta |
+| INSERTION | `PATCH_SOCKET_INSERTION` | Sets `current_move_type=INSERTION`, `cudaMemcpy` trial pos → filter → `MCEnergyWrapper()` |
+| DELETION | `PATCH_SOCKET_DELETION` | Sets `current_move_type=DELETION`, same flow for deletion candidate |
+| TRANSLATION/ROTATION | `PATCH_SOCKET_SINGLE` | Sets `current_move_type` for new and old calls separately; returns `E_new - E_old` |
+| SINGLE_INSERTION | `PATCH_SOCKET_SINGLE` | Sets `current_move_type=SINGLE_INSERTION`; evaluates new only |
+| SINGLE_DELETION | `PATCH_SOCKET_SINGLE` | Sets `current_move_type=SINGLE_DELETION`; evaluates old only |
+| REINSERTION | `PATCH_SOCKET_REINSERTION` | Sets `current_move_type=REINSERTION` for both new and old; returns delta |
 | Total energy | `PATCH_SOCKET_FXNMAIN` | Loop over all molecules in component 1, sum energies |
 
 ### `fxn_main.h`
@@ -260,7 +283,21 @@ Filters atoms using `ConsiderThisAdsorbateAtom[]` boolean array (excludes fictio
 
 ## 7. Patching System
 
-The codebase uses a text-marker patching approach. Each marker in `src_clean` corresponds to a patch file in `socket-patch/Socket/`:
+The codebase uses a text-marker patching approach. `patch.py` reads every
+`socket-patch/Socket/PATCH_SOCKET_*.txt` file, locates the matching
+`###PATCH_SOCKET_*###` marker in the corresponding `src_clean/` file, and
+inserts the snippet code immediately after it, producing the buildable
+`patch_Socket/` directory.
+
+### Special case: `ase_energy_client.h`
+
+**`ase_energy_client.h` has no patch markers.** `patch.py` copies it verbatim
+from `src_clean/` to `patch_Socket/`. The authoritative source is therefore
+`src_clean/ase_energy_client.h` — edit it there and `patch_Socket/` will be
+updated on the next `patch.py` run. Never edit `patch_Socket/ase_energy_client.h`
+directly without also updating `src_clean/`.
+
+### Patch marker table
 
 | Marker in `src_clean` | Patch File | Target File |
 |-----------------------|-----------|-------------|
@@ -276,7 +313,19 @@ The codebase uses a text-marker patching approach. Each marker in `src_clean` co
 | `###PATCH_SOCKET_REINSERTION###` | (same file) | `DNN_HostGuest_Energy_Functions.h` |
 | `###PATCH_SOCKET_FXNMAIN###` | (same file) | `DNN_HostGuest_Energy_Functions.h` |
 
-**To apply patches:** Replace each `//###PATCH_SOCKET_*###//` line with the corresponding snippet. The `patch_Socket/` directory contains the already-patched result.
+### Update workflow
+
+When making changes to socket logic:
+
+| File to change | Edit here | Also update |
+|----------------|-----------|-------------|
+| `ase_energy_client.h` | `src_clean/ase_energy_client.h` | `patch_Socket/` via `patch.py` |
+| `read_data.cpp` socket section | `socket-patch/Socket/PATCH_SOCKET_read_data.cpp.txt` | `patch_Socket/` via `patch.py` |
+| `main.cpp` socket setup | `socket-patch/Socket/PATCH_SOCKET_main.cpp.txt` | `patch_Socket/` via `patch.py` |
+| `DNN_HostGuest_Energy_Functions.h` | `socket-patch/Socket/PATCH_SOCKET_DNN_HostGuest_Energy_Functions.h.txt` | `patch_Socket/` via `patch.py` |
+
+**To apply patches:** `python patch.py` (requires `pandas` and `matplotlib`).
+The `patch_Socket/` directory always contains the already-patched, buildable result.
 
 ---
 
@@ -291,6 +340,18 @@ DNNEnergyUnit         eV          # or kJ_mol
 MaxDNNDrift           100000      # threshold in internal units
 DNNModelName          Socket      # identifier (not a file path for socket mode)
 ```
+
+### `simulation.input` Optional Validation Settings
+
+```
+ValidationMode        yes         # dump every MACE call to validation_dump_box<N>.xyz
+ValidationMaxFrames   50          # stop dumping after this many frames (default 100)
+```
+
+When `ValidationMode=yes`, gRASPA writes an extended-XYZ file
+`validation_dump_box0.xyz` (one per simulation box) and `validate_energies.py`
+can be used to re-run MACE independently on those frames. See
+[Section 15](#energy-validation).
 
 ### Energy Unit Conversion
 
@@ -474,7 +535,94 @@ gRASPA side:
 2. **Synchronous/blocking I/O** — no pipelining or async evaluation
 3. **Socket path hardcoded** — changing requires source modification and recompilation
 4. **Single socket connection** — one ML server per simulation
-5. **Rigid framework only** — `main.cpp` throws if framework is not rigid or has multiple components
+5. **Rigid molecules and framework only** — `read_data.cpp` throws `std::runtime_error` at startup if any adsorbate component is not marked `rigid` in its `.def` file; the framework is assumed fixed throughout the simulation. If flexible molecules or frameworks are ever added, `cached_E_adsorbate_ev` and `cached_E_framework_ev` must be invalidated (set `cache_valid = false`) before each `Predict()` call.
 6. **Component 1 assumption** — adsorbate is always component index 1 in several places
 7. **Forces/virial unused** — read from server for protocol compliance but discarded
 8. **Server reconnection** — the server accepts new connections after a client disconnects, but the C++ client has no reconnect logic (if the server dies mid-simulation, gRASPA terminates)
+9. **Validation dump is append-only** — `OpenValidationFile()` opens the file in write mode (`"w"`), so a previous dump is overwritten if the simulation is restarted
+
+---
+
+## 15. Energy Validation
+
+The validation system lets you confirm that:
+- gRASPA sends the correct atomic species and positions to MACE on initialisation (self-energy cache integrity)
+- gRASPA passes the correct structure during each MC move (geometry integrity)
+- The energies recorded internally by gRASPA match an independent MACE evaluation
+
+### Enable in `simulation.input`
+
+```
+ValidationMode        yes
+ValidationMaxFrames   50   # optional; default 100
+```
+
+### Output file format
+
+`validation_dump_box0.xyz` is a concatenated extended-XYZ file (one frame per
+`Predict()` call, up to `ValidationMaxFrames`):
+
+```
+<natoms_total>
+MOVE=<label> E_total_ev=<v> E_fw_ev=<v> E_ads_ev=<v> E_int_ev=<v>
+  N_FW=<n_fw> Lattice="a1 a2 a3 b1 b2 b3 c1 c2 c3" Properties=species:S:1:pos:R:3 pbc="T T T"
+<symbol> x y z
+...
+```
+
+- `MOVE` is one of: `TRANSLATION`, `ROTATION`, `SINGLE_INSERTION`,
+  `SINGLE_DELETION`, `SPECIAL_ROTATION`, `INSERTION`, `DELETION`,
+  `REINSERTION`, `WIDOM`, …
+- `N_FW` is the number of leading atoms that belong to the framework; all
+  remaining atoms are the adsorbate. This allows `validate_energies.py` to
+  split the system without a separate species file.
+- `Lattice` is the 3×3 supercell in row-major order (rows = lattice vectors),
+  matching the ASE `Atoms(cell=...)` convention.
+- All energies are in **eV**.
+
+### Running the validation script
+
+```bash
+python validate_energies.py \
+    --xyz  validation_dump_box0.xyz \
+    --model /path/to/mace-mpa-0-medium.model \
+    --device cuda \
+    --tol 1e-4
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--xyz` | required | Validation dump file from gRASPA |
+| `--model` | required | MACE model file path (.pt) |
+| `--device` | `cpu` | `cpu` or `cuda` |
+| `--dtype` | `float64` | `float32` or `float64` |
+| `--tol` | `1e-4` | Failure threshold for `|ΔE_int|` in eV |
+| `--max-frames` | all | Stop after N frames |
+
+**Checks performed:**
+
+1. **Frame 0 — self-energy verification** (computed once):
+   - `MACE(framework atoms only)` vs `gRASPA cached E_fw`
+   - `MACE(adsorbate atoms only)` vs `gRASPA cached E_ads`
+   - A mismatch here means the wrong positions or species were sent to MACE at
+     initialisation.
+
+2. **All frames — interaction energy**:
+   - `MACE(all atoms) − E_fw_mace − E_ads_mace` vs `gRASPA E_int`
+   - A mismatch here means gRASPA is sending different positions during the MC
+     loop than it believes it is sending (geometry integrity).
+
+**Exit codes:** 0 = all frames pass; 1 = at least one failure or no frames
+processed.
+
+### Interpreting results
+
+| Symptom | Likely cause |
+|---------|-------------|
+| Frame 0 E_fw mismatch | Wrong framework positions in `cached_xyz_framework`; check `CopyAtomsFromFirstUnitcell()` and `GenerateReplicaCells()` |
+| Frame 0 E_ads mismatch | Wrong adsorbate positions at init; check the template molecule copy in `main.cpp` |
+| Per-frame E_int matches but E_total doesn't | `E_fw_mace + E_ads_mace ≠ E_fw_graspa + E_ads_graspa` — cache mismatch |
+| Per-frame E_int mismatch | Positions actually sent to MACE differ from what gRASPA tracks internally (PBC wrapping, atom ordering, or unit conversion bug) |
+| All values match to machine precision | Pipeline is consistent ✓ |

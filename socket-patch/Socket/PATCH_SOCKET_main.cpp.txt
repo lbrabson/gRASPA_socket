@@ -55,6 +55,13 @@ PATCH_SOCKET_MAIN_PREP
         if(Vars.SystemComponents[a].DNN.connect_socket() < 0)
           throw std::runtime_error("Failed to connect to ML server socket");
 
+        // Open validation dump file after connecting (after startup test calls below)
+        if(Vars.SystemComponents[a].DNN.validation_mode)
+        {
+          std::string dumppath = "validation_dump_box" + std::to_string(a) + ".xyz";
+          Vars.SystemComponents[a].DNN.OpenValidationFile(dumppath);
+        }
+
         // First test energy evaluation (ReplicaAtoms already populated)
         double DNN_E = Vars.SystemComponents[a].DNN.Predict() * Vars.SystemComponents[a].DNNEnergyConversion;
         printf("Initialize Model, sum (from Unitcell values): %f\n", DNN_E);

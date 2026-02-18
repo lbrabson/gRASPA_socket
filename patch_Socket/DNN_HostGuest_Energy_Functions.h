@@ -205,6 +205,7 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
 //        for(size_t i = 0; i < SystemComponents.DNN.UCAtoms[SelectedComponent].size; i++)
 //          printf("pos: %f %f %f\n", SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].x, SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].y, SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].z);
 //      }
+      SystemComponents.DNN.current_move_type = MoveType;
       DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
       free(temp_pos);
     }
@@ -228,6 +229,7 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
       double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
       cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
       Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+      SystemComponents.DNN.current_move_type = MoveType;
       DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
       free(temp_pos);
     }
@@ -251,6 +253,7 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
       {
         cudaMemcpy(temp_pos, Sims.New.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
         Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+        SystemComponents.DNN.current_move_type = MoveType;
         DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
         //printf("DNN_New %f\n", DNN_New);
       }
@@ -258,6 +261,7 @@ double DNN_Prediction_Move(Components& SystemComponents, Simulations& Sims, size
       {
         cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
         Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+        SystemComponents.DNN.current_move_type = MoveType;
         DNN_Old = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
         //printf("DNN_New %f\n", DNN_Old);
       }
@@ -283,10 +287,12 @@ double DNN_Prediction_Reinsertion(Components& SystemComponents, Simulations& Sim
     //NEW//
     cudaMemcpy(temp_pos, temp, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
     Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+    SystemComponents.DNN.current_move_type = REINSERTION;
     DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
     //OLD//
     cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
     Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
+    SystemComponents.DNN.current_move_type = REINSERTION;
     DNN_Old = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
     free(temp_pos);
   }

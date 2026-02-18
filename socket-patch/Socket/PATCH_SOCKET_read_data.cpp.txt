@@ -20,9 +20,22 @@ void ReadSocketModelParameters(Components& SystemComponents)
       SystemComponents.DNNDrift = std::stod(termsScannedLined[1]);
       found_drift = true;
     }
+    if (str.find("ValidationMode", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      if(caseInSensStringCompare(termsScannedLined[1], "yes") ||
+         caseInSensStringCompare(termsScannedLined[1], "true"))
+        SystemComponents.DNN.validation_mode = true;
+    }
+    if (str.find("ValidationMaxFrames", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      SystemComponents.DNN.validation_max = std::stoul(termsScannedLined[1]);
+    }
   }
   if(!found_name)  throw std::runtime_error("Model Name not found!!!!");
   if(!found_drift) throw std::runtime_error("Drift parameter not found!!!!");
 
   printf("DNN Model Name: %s\n", SystemComponents.ModelName[0].c_str());
 }
+

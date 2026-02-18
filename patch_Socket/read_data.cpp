@@ -3120,6 +3120,18 @@ void ReadDNNModelSetup(Components& SystemComponents)
       else
       {throw std::runtime_error("Unknown Energy Unit for DNN Model");}
     }
+    if (str.find("ValidationMode", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      if(caseInSensStringCompare(termsScannedLined[1], "yes") ||
+         caseInSensStringCompare(termsScannedLined[1], "true"))
+        SystemComponents.DNN.validation_mode = true;
+    }
+    if (str.find("ValidationMaxFrames", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      SystemComponents.DNN.validation_max = std::stoul(termsScannedLined[1]);
+    }
   }
   if(SystemComponents.UseDNNforHostGuest && !DNNUnitFound)
     throw std::runtime_error("You are using DNN models but there is no ENERGY UNIT specified!!!!");

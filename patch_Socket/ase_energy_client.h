@@ -33,6 +33,17 @@ struct Socket
     double cached_E_framework_ev = 0.0;
     double cached_E_adsorbate_ev = 0.0;
     bool   cache_valid = false;
+
+    // Cached xyz arrays promoted to members so DumpValidationFrame can access them
+    std::vector<double> cached_xyz_framework;
+    std::vector<double> cached_xyz_adsorbate;
+
+    // Validation dump: writes every MACE call to a file for independent verification
+    bool   validation_mode  = false;
+    size_t validation_max   = 100;   // stop dumping after this many total-energy calls
+    size_t validation_count = 0;
+    FILE*  validation_fp    = nullptr;
+    int    current_move_type = -1;   // set by DNN_Prediction_Move before each MCEnergyWrapper call
   
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
@@ -397,50 +408,137 @@ struct Socket
         if (!cache_valid)
         {
             // First call: compute and cache framework and adsorbate energies
-            static std::vector<double> xyz_framework;
-            static std::vector<double> xyz_adsorbate;
-
-            xyz_framework.resize(3 * n_framework);
-            xyz_adsorbate.resize(3 * n_adsorbate);
+            cached_xyz_framework.resize(3 * n_framework);
+            cached_xyz_adsorbate.resize(3 * n_adsorbate);
 
             for (size_t i = 0; i < n_framework; i++)
             {
-                xyz_framework[3*i + 0] = ReplicaAtoms[0].pos[i].x;
-                xyz_framework[3*i + 1] = ReplicaAtoms[0].pos[i].y;
-                xyz_framework[3*i + 2] = ReplicaAtoms[0].pos[i].z;
+                cached_xyz_framework[3*i + 0] = ReplicaAtoms[0].pos[i].x;
+                cached_xyz_framework[3*i + 1] = ReplicaAtoms[0].pos[i].y;
+                cached_xyz_framework[3*i + 2] = ReplicaAtoms[0].pos[i].z;
             }
 
             counter = 0;
             for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
             for (size_t i = 0; i < ReplicaAtoms[comp].size; i++)
             {
-                xyz_adsorbate[3*counter + 0] = ReplicaAtoms[comp].pos[i].x;
-                xyz_adsorbate[3*counter + 1] = ReplicaAtoms[comp].pos[i].y;
-                xyz_adsorbate[3*counter + 2] = ReplicaAtoms[comp].pos[i].z;
+                cached_xyz_adsorbate[3*counter + 0] = ReplicaAtoms[comp].pos[i].x;
+                cached_xyz_adsorbate[3*counter + 1] = ReplicaAtoms[comp].pos[i].y;
+                cached_xyz_adsorbate[3*counter + 2] = ReplicaAtoms[comp].pos[i].z;
                 counter++;
             }
 
-            cached_E_framework_ev = PredictFromSocket(xyz_framework.data(), n_framework);
-            cached_E_adsorbate_ev = PredictFromSocket(xyz_adsorbate.data(), n_adsorbate);
+            cached_E_framework_ev = PredictFromSocket(cached_xyz_framework.data(), n_framework);
+            cached_E_adsorbate_ev = PredictFromSocket(cached_xyz_adsorbate.data(), n_adsorbate);
             cache_valid = true;
 
-            std::cout << "ML E_total_ev     = " << E_total_ev           << " eV (computed)" << std::endl;
-            std::cout << "ML E_framework_ev = " << cached_E_framework_ev << " eV (computed, cached)" << std::endl;
-            std::cout << "ML E_adsorbate_ev = " << cached_E_adsorbate_ev << " eV (computed, cached)" << std::endl;
-        }
-        else
-        {
-            std::cout << "ML E_total_ev     = " << E_total_ev           << " eV (computed)" << std::endl;
-            std::cout << "ML E_framework_ev = " << cached_E_framework_ev << " eV (cached)" << std::endl;
-            std::cout << "ML E_adsorbate_ev = " << cached_E_adsorbate_ev << " eV (cached)" << std::endl;
+            // ===== UNIT VALIDATION LOG (fires once at initialization) =====
+            // Positions must be Angstrom-scale (~1-30 Ang). Energies must be eV-scale
+            // (~-1e3 to -1e4 eV for a MOF supercell). If values look wrong (e.g. Bohr-scale
+            // positions would be ~2x larger), there is a unit bug in the pipeline.
+            printf("=== Socket ML Potential Unit Validation ===\n");
+            printf("Supercell cell sent to MACE (should be Angstrom, ~3x primitive cell):\n");
+            printf("  a = [%9.4f, %9.4f, %9.4f] Ang\n", ReplicaBox.Cell[0], ReplicaBox.Cell[1], ReplicaBox.Cell[2]);
+            printf("  b = [%9.4f, %9.4f, %9.4f] Ang\n", ReplicaBox.Cell[3], ReplicaBox.Cell[4], ReplicaBox.Cell[5]);
+            printf("  c = [%9.4f, %9.4f, %9.4f] Ang\n", ReplicaBox.Cell[6], ReplicaBox.Cell[7], ReplicaBox.Cell[8]);
+            printf("Atom counts: framework=%zu  adsorbate=%zu  total=%zu\n", n_framework, n_adsorbate, n_total);
+            printf("First framework positions (should be Angstrom-scale, not Bohr ~x1.89):\n");
+            for (size_t i = 0; i < std::min((size_t)3, n_framework); i++)
+                printf("  fw[%zu]: (%9.4f, %9.4f, %9.4f) Ang\n", i, cached_xyz_framework[3*i], cached_xyz_framework[3*i+1], cached_xyz_framework[3*i+2]);
+            printf("First adsorbate positions:\n");
+            for (size_t i = 0; i < std::min((size_t)3, n_adsorbate); i++)
+                printf("  ads[%zu]: (%9.4f, %9.4f, %9.4f) Ang\n", i, cached_xyz_adsorbate[3*i], cached_xyz_adsorbate[3*i+1], cached_xyz_adsorbate[3*i+2]);
+            printf("Energies (eV-scale; typical MOF supercell: -1e3 to -1e4 eV):\n");
+            printf("  E_total     = %14.6f eV\n", E_total_ev);
+            printf("  E_framework = %14.6f eV  [cached: rigid framework]\n", cached_E_framework_ev);
+            printf("  E_adsorbate = %14.6f eV  [cached: rigid molecule -> self-energy is position-independent]\n", cached_E_adsorbate_ev);
+            printf("  E_int       = %14.6f eV  [returned to gRASPA MC engine]\n", E_total_ev - cached_E_framework_ev - cached_E_adsorbate_ev);
+            printf("  NOTE: if flexible adsorbates or a flexible framework are ever added,\n");
+            printf("        the cache must be invalidated on each call.\n");
+            printf("===========================================\n");
         }
 
+        nstep++;
+        if (nstep % 1000 == 0)
+        {
+            printf("[Socket step %zu] E_total=%14.6f eV  E_fw=%14.6f eV (cached)  E_ads=%14.6f eV (cached)  E_int=%14.6f eV\n",
+                   nstep, E_total_ev, cached_E_framework_ev, cached_E_adsorbate_ev,
+                   E_total_ev - cached_E_framework_ev - cached_E_adsorbate_ev);
+        }
+
+        // Validation dump: write structure + energies so they can be re-evaluated independently
+        if (validation_mode && validation_fp && validation_count < validation_max)
+            DumpValidationFrame(xyz_total.data(), n_total, E_total_ev, current_move_type);
+
         return E_total_ev - cached_E_framework_ev - cached_E_adsorbate_ev;
+    }
+
+    void OpenValidationFile(const std::string& path)
+    {
+        validation_fp = fopen(path.c_str(), "w");
+        if (!validation_fp)
+            fprintf(stderr, "WARNING: Cannot open validation dump file: %s\n", path.c_str());
+        else
+            printf("Validation dump enabled: %s (max %zu frames)\n", path.c_str(), validation_max);
+    }
+
+    // Writes one frame to the validation dump file in extended-XYZ format.
+    // The file can be parsed by validate_energies.py which re-runs MACE independently
+    // and compares E_int = E_total - E_framework - E_adsorbate to the gRASPA value.
+    //
+    // Format per frame:
+    //   <natoms_total>
+    //   MOVE=<label> E_total_ev=<v> E_fw_ev=<v> E_ads_ev=<v> E_int_ev=<v>
+    //     CELL_ANG: a1 a2 a3 b1 b2 b3 c1 c2 c3
+    //   <symbol> x y z   (repeated natoms_total times, framework first then adsorbate)
+    void DumpValidationFrame(const double* xyz_total, size_t n_total,
+                             double E_total_ev, int move_type)
+    {
+        static const char* MoveLabel[] = {
+            "TRANSLATION", "ROTATION", "SINGLE_INSERTION", "SINGLE_DELETION",
+            "SPECIAL_ROTATION", "INSERTION", "DELETION", "REINSERTION",
+            "CBCF_LAMBDACHANGE", "CBCF_INSERTION", "CBCF_DELETION", "IDENTITY_SWAP", "WIDOM"
+        };
+        const char* label = (move_type >= 0 && move_type <= 12) ? MoveLabel[move_type] : "UNKNOWN";
+
+        double E_int_ev = E_total_ev - cached_E_framework_ev - cached_E_adsorbate_ev;
+
+        // Extended-XYZ header
+        fprintf(validation_fp, "%zu\n", n_total);
+        size_t n_fw = cached_xyz_framework.size() / 3;
+        fprintf(validation_fp,
+                "MOVE=%s E_total_ev=%.10f E_fw_ev=%.10f E_ads_ev=%.10f E_int_ev=%.10f "
+                "N_FW=%zu "
+                "Lattice=\"%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\" "
+                "Properties=species:S:1:pos:R:3 pbc=\"T T T\"\n",
+                label,
+                E_total_ev, cached_E_framework_ev, cached_E_adsorbate_ev, E_int_ev,
+                n_fw,
+                ReplicaBox.Cell[0], ReplicaBox.Cell[1], ReplicaBox.Cell[2],
+                ReplicaBox.Cell[3], ReplicaBox.Cell[4], ReplicaBox.Cell[5],
+                ReplicaBox.Cell[6], ReplicaBox.Cell[7], ReplicaBox.Cell[8]);
+
+        // Atom positions: framework first, then adsorbate (mirrors xyz_total assembly order)
+        size_t atom_idx = 0;
+        for (size_t comp = 0; comp < ReplicaAtoms.size(); comp++)
+        for (size_t i = 0; i < ReplicaAtoms[comp].size; i++)
+        {
+            size_t type_idx = ReplicaAtoms[comp].Type[i];
+            const std::string& sym = (type_idx < ElementSymbolUsed.size())
+                                     ? ElementSymbolUsed[type_idx] : "X";
+            fprintf(validation_fp, "%s %.10f %.10f %.10f\n",
+                    sym.c_str(),
+                    xyz_total[3*atom_idx], xyz_total[3*atom_idx+1], xyz_total[3*atom_idx+2]);
+            atom_idx++;
+        }
+        fflush(validation_fp);
+        validation_count++;
     }
 
     /* Clean shutdown */
     void close_socket()
     {
+        if (validation_fp) { fclose(validation_fp); validation_fp = nullptr; }
         if (fd >= 0) {
             send_command("EXIT");
             close(fd);
