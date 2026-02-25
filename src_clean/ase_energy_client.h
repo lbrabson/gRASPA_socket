@@ -8,16 +8,26 @@
 #include <cstdlib>
 #include <cstring>
 
+// Config-type constants for socket routing.
+// These are sent as a 4-byte int32 BEFORE the cell matrix in every POSDATA
+// exchange so the Python server can unambiguously identify which symbol list
+// to use, regardless of atom count.
+//
+//   CONFIG_FRAMEWORK (0)   : framework-only configuration
+//   N   (1, 2, ...)        : adsorbate-only for component N
+//   100+N (101, 102, ...)  : total (framework + adsorbate component N)
+enum ConfigType : int32_t {
+    CONFIG_FRAMEWORK = 0,
+    // adsorbate-only:  use ads_comp directly (1, 2, ...)
+    // total:           use 100 + ads_comp (101, 102, ...)
+};
+
 struct Socket
 {
     Boxsize UCBox;
-    Boxsize ReplicaBox;
     std::vector<Atoms> UCAtoms;
-    std::vector<Atoms> ReplicaAtoms;
     std::vector<std::string> ElementSymbolUsed;
     std::vector<int>Match_Element_PseudoAtom_order; //length = # of PseudoAtoms, value stored = order in the Socket//
-
-    int3 NReplicacell = {1,1,1};
 
     char socket_path[108] = "/tmp/ase_ipi_socket";  // UNIX path limit
     int    fd     = -1;   // UNIX socket file descriptor
@@ -29,11 +39,6 @@ struct Socket
 
     bool handshake_done = false;
 
-    // Cache for framework and adsorbate energies (constant across MC moves)
-    double cached_E_framework_ev = 0.0;
-    double cached_E_adsorbate_ev = 0.0;
-    bool   cache_valid = false;
-  
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
     {
@@ -96,6 +101,27 @@ struct Socket
         return 0;
     }   
 
+    // Send species map immediately after handshake.
+    // Binary format (all int32 in network byte order):
+    //   "SPECIESMAP" header (12-byte padded ASCII)
+    //   int32  n_species
+    //   int32  n_fw       (atom count in UCAtoms[0])
+    //   for each species: int32 index, int32 len, len bytes symbol
+    void send_species_map()
+    {
+        send_header("SPECIESMAP");
+        send_int32((int32_t)ElementSymbolUsed.size());
+        send_int32((int32_t)UCAtoms[0].size);   // n_fw atoms
+        for (size_t i = 0; i < ElementSymbolUsed.size(); i++) {
+            send_int32((int32_t)i);
+            int32_t len = (int32_t)ElementSymbolUsed[i].size();
+            send_int32(len);
+            write_all(ElementSymbolUsed[i].c_str(), len);
+        }
+        printf("Sent species map: %zu species, n_fw=%zu\n",
+               ElementSymbolUsed.size(), UCAtoms[0].size);
+    }
+
     /* Connect to i-PI */
     int connect_socket()
     {
@@ -128,9 +154,30 @@ struct Socket
             return -1;
         }
         
-        handshake_done = true;  // ADD THIS
+        handshake_done = true;
+        send_species_map();
+        PrimeFrameworkCache();    // prime E_fw cache in Python server
 
         return 0;
+    }
+
+    /* Send framework atoms to Python so it can compute and cache E_fw.
+       Called at end of connect_socket() after send_species_map(). */
+    void PrimeFrameworkCache()
+    {
+        size_t n_fw = UCAtoms[0].size;
+        std::vector<double>  xyz_fw(3 * n_fw);
+        std::vector<int32_t> types_fw(n_fw);
+        for (size_t i = 0; i < n_fw; i++) {
+            xyz_fw[3*i+0] = UCAtoms[0].pos[i].x;
+            xyz_fw[3*i+1] = UCAtoms[0].pos[i].y;
+            xyz_fw[3*i+2] = UCAtoms[0].pos[i].z;
+            types_fw[i]   = (int32_t)UCAtoms[0].Type[i];
+        }
+        double E_fw_ev = PredictFromSocket(
+            xyz_fw.data(), types_fw.data(), n_fw,
+            (int32_t)CONFIG_FRAMEWORK, 0);
+        printf("Python E_fw cache primed: %.6f eV\n", E_fw_ev);
     }
 
     /* Robust write */
@@ -185,59 +232,82 @@ struct Socket
         return write_all(buffer, strlen(buffer));
     }
 
-    /* Send positions */
-    int send_positions(const double *xyz)
+    /* Send positions + types.
+       Wire format after STATUS/READY/POSDATA handshake:
+         int32   config_type    routing tag
+         9×f64   cell
+         9×f64   inv_cell       (zeroed — server uses PBC via cell)
+         int32   n_mol          adsorbate molecule count (0 for fw/ads-only calls)
+         int32   n_atoms
+         N×int32 types          species index per atom
+         3N×f64  xyz            Cartesian coordinates (Å)
+    */
+    int send_positions(const double *xyz, const int32_t *types,
+                       size_t n_atoms, int32_t config_type, int32_t n_mol)
     {
-        // 1. Wait for STATUS
         char header[12];
+
+        // 1. Wait for STATUS
         read_all(header, 12);
         if (strncmp(header, "STATUS", 6) != 0) {
             fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
             return -1;
         }
-        
+
         // 2. Send READY
         send_header("READY");
-        
+
         // 3. Wait for POSDATA request
         read_all(header, 12);
         if (strncmp(header, "POSDATA", 7) != 0) {
             fprintf(stderr, "Expected POSDATA, got: %.12s\n", header);
             return -1;
         }
-        
-        // 4. Send cell matrix (9 doubles)
-        write_all(ReplicaBox.Cell, sizeof(double) * 9);
-        
-        // 5. Send inverse cell (9 doubles)
+
+        // 4. config_type routing tag
+        send_int32(config_type);
+
+        // 5. Cell matrix (9 doubles)
+        write_all(UCBox.Cell, sizeof(double) * 9);
+
+        // 6. Inverse cell (9 doubles, zeroed)
         double inv_cell[9] = {0};
         write_all(inv_cell, sizeof(double) * 9);
-        
-        // 6. Send number of atoms (int32)
-        send_int32((int32_t)natoms);
-        
-        // 7. Send positions
-        write_all(xyz, sizeof(double) * 3 * natoms);
-        
-        // 8. Wait for STATUS
+
+        // 7. n_mol
+        send_int32(n_mol);
+
+        // 8. n_atoms
+        send_int32((int32_t)n_atoms);
+
+        // 9. Types array (n_atoms × int32, network byte order)
+        std::vector<int32_t> types_net(n_atoms);
+        for (size_t i = 0; i < n_atoms; i++)
+            types_net[i] = htonl((uint32_t)types[i]);
+        write_all(types_net.data(), sizeof(int32_t) * n_atoms);
+
+        // 10. Positions (3*n_atoms doubles)
+        write_all(xyz, sizeof(double) * 3 * n_atoms);
+
+        // 11. Wait for STATUS
         read_all(header, 12);
         if (strncmp(header, "STATUS", 6) != 0) {
             fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
             return -1;
+        }
+
+        // 12. Send HAVEDATA
+        send_header("HAVEDATA");
+
+        // 13. Wait for GETFORCE
+        read_all(header, 12);
+        if (strncmp(header, "GETFORCE", 8) != 0) {
+            fprintf(stderr, "Expected GETFORCE, got: %.12s\n", header);
+            return -1;
+        }
+
+        return 0;
     }
-    
-    // 9. Send HAVEDATA
-    send_header("HAVEDATA");
-    
-    // 10. Wait for GETFORCE
-    read_all(header, 12);
-    if (strncmp(header, "GETFORCE", 8) != 0) {
-        fprintf(stderr, "Expected GETFORCE, got: %.12s\n", header);
-        return -1;
-    }
-    
-    return 0;
-    }   
 
     int receive_energy(double *energy_ev)
     {
@@ -299,8 +369,9 @@ struct Socket
         return 0;
     }
 
-    /* Send coords and receive single energy */
-    double PredictFromSocket(const double* xyz, size_t n_atoms)
+    /* Send coords + types and receive single energy scalar. */
+    double PredictFromSocket(const double* xyz, const int32_t* types,
+                             size_t n_atoms, int32_t config_type, int32_t n_mol)
     {
         if (fd < 0) {
             fprintf(stderr, "Socket not connected — attempting auto-connect\n");
@@ -310,132 +381,56 @@ struct Socket
             }
         }
 
-        natoms = n_atoms;   // update current atom count for socket
+        natoms = n_atoms;
 
-        // debugging by printing positions
-        printf("[CLIENT] Sending POSDATA, natoms = %zu\n", natoms);
-        for (size_t i = 0; i < std::min(natoms, (size_t)5); i++) {
-            printf("  atom %zu: %f %f %f\n",
-                i, xyz[3*i], xyz[3*i+1], xyz[3*i+2]);
-        }
-        fflush(stderr);
+        printf("[CLIENT] POSDATA natoms=%zu config_type=%d n_mol=%d\n",
+               natoms, (int)config_type, (int)n_mol);
+        for (size_t i = 0; i < std::min(natoms, (size_t)5); i++)
+            printf("  atom %zu: %.5f %.5f %.5f type=%d\n",
+                   i, xyz[3*i], xyz[3*i+1], xyz[3*i+2], (int)types[i]);
+        fflush(stdout);
 
-        // send positions
-        send_positions(xyz);
+        send_positions(xyz, types, n_atoms, config_type, n_mol);
 
         double energy_ev;
-        receive_energy(&energy_ev); // reads just energy from i-PI socket
-
+        receive_energy(&energy_ev);
         return energy_ev;
     }
 
-    void WriteSpeciesFile(std::string path)
+    /* Full evaluation of host-guest interaction for one trial adsorbate molecule.
+       Python returns HG = E(fw+ads) - E_fw_cached - E(ads) directly. */
+    double Predict(size_t ads_comp = 1)
     {
-        FILE* fp = fopen(path.c_str(), "w");
-        if (!fp) {
-            fprintf(stderr, "ERROR: Cannot open %s for writing\n", path.c_str());
-            return;
-        }
+        size_t n_framework = UCAtoms[0].size;
+        size_t n_adsorbate = UCAtoms[ads_comp].size;
+        size_t n_total     = n_framework + n_adsorbate;
 
-        // Framework (component 0)
-        fprintf(fp, "FRAMEWORK %zu\n", ReplicaAtoms[0].size);
-        for (size_t i = 0; i < ReplicaAtoms[0].size; i++) {
-            size_t t = ReplicaAtoms[0].Type[i];
-            fprintf(fp, "%s", ElementSymbolUsed[t].c_str());
-            if (i + 1 < ReplicaAtoms[0].size) fprintf(fp, " ");
-        }
-        fprintf(fp, "\n");
-
-        // Adsorbate (components 1..N)
-        size_t n_ads = 0;
-        for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
-            n_ads += ReplicaAtoms[comp].size;
-
-        fprintf(fp, "ADSORBATE %zu\n", n_ads);
-        size_t printed = 0;
-        for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
-            for (size_t i = 0; i < ReplicaAtoms[comp].size; i++) {
-                size_t t = ReplicaAtoms[comp].Type[i];
-                fprintf(fp, "%s", ElementSymbolUsed[t].c_str());
-                printed++;
-                if (printed < n_ads) fprintf(fp, " ");
-            }
-        fprintf(fp, "\n");
-
-        fclose(fp);
-        printf("Wrote species file: %s (fw=%zu, ads=%zu)\n",
-               path.c_str(), ReplicaAtoms[0].size, n_ads);
-    }
-
-    /* Full evaluation of host-guest interactions */
-    double Predict()
-    {
-        size_t n_framework = ReplicaAtoms[0].size;
-
-        size_t n_adsorbate = 0;
-        for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
-            n_adsorbate += ReplicaAtoms[comp].size;
-
-        size_t n_total = n_framework + n_adsorbate;
-
-        static std::vector<double> xyz_total;
-
-        xyz_total.resize(3 * n_total);
-
+        std::vector<double>  xyz_total(3 * n_total);
+        std::vector<int32_t> types_total(n_total);
         size_t counter = 0;
-        for (size_t comp = 0; comp < ReplicaAtoms.size(); comp++)
-        for (size_t i = 0; i < ReplicaAtoms[comp].size; i++)
+
+        for (size_t i = 0; i < n_framework; i++)
         {
-            xyz_total[3*counter + 0] = ReplicaAtoms[comp].pos[i].x;
-            xyz_total[3*counter + 1] = ReplicaAtoms[comp].pos[i].y;
-            xyz_total[3*counter + 2] = ReplicaAtoms[comp].pos[i].z;
+            xyz_total[3*counter + 0] = UCAtoms[0].pos[i].x;
+            xyz_total[3*counter + 1] = UCAtoms[0].pos[i].y;
+            xyz_total[3*counter + 2] = UCAtoms[0].pos[i].z;
+            types_total[counter]     = (int32_t)UCAtoms[0].Type[i];
+            counter++;
+        }
+        for (size_t i = 0; i < n_adsorbate; i++)
+        {
+            xyz_total[3*counter + 0] = UCAtoms[ads_comp].pos[i].x;
+            xyz_total[3*counter + 1] = UCAtoms[ads_comp].pos[i].y;
+            xyz_total[3*counter + 2] = UCAtoms[ads_comp].pos[i].z;
+            types_total[counter]     = (int32_t)UCAtoms[ads_comp].Type[i];
             counter++;
         }
 
-        double E_total_ev = PredictFromSocket(xyz_total.data(), n_total);
-
-        if (!cache_valid)
-        {
-            // First call: compute and cache framework and adsorbate energies
-            static std::vector<double> xyz_framework;
-            static std::vector<double> xyz_adsorbate;
-
-            xyz_framework.resize(3 * n_framework);
-            xyz_adsorbate.resize(3 * n_adsorbate);
-
-            for (size_t i = 0; i < n_framework; i++)
-            {
-                xyz_framework[3*i + 0] = ReplicaAtoms[0].pos[i].x;
-                xyz_framework[3*i + 1] = ReplicaAtoms[0].pos[i].y;
-                xyz_framework[3*i + 2] = ReplicaAtoms[0].pos[i].z;
-            }
-
-            counter = 0;
-            for (size_t comp = 1; comp < ReplicaAtoms.size(); comp++)
-            for (size_t i = 0; i < ReplicaAtoms[comp].size; i++)
-            {
-                xyz_adsorbate[3*counter + 0] = ReplicaAtoms[comp].pos[i].x;
-                xyz_adsorbate[3*counter + 1] = ReplicaAtoms[comp].pos[i].y;
-                xyz_adsorbate[3*counter + 2] = ReplicaAtoms[comp].pos[i].z;
-                counter++;
-            }
-
-            cached_E_framework_ev = PredictFromSocket(xyz_framework.data(), n_framework);
-            cached_E_adsorbate_ev = PredictFromSocket(xyz_adsorbate.data(), n_adsorbate);
-            cache_valid = true;
-
-            std::cout << "ML E_total_ev     = " << E_total_ev           << " eV (computed)" << std::endl;
-            std::cout << "ML E_framework_ev = " << cached_E_framework_ev << " eV (computed, cached)" << std::endl;
-            std::cout << "ML E_adsorbate_ev = " << cached_E_adsorbate_ev << " eV (computed, cached)" << std::endl;
-        }
-        else
-        {
-            std::cout << "ML E_total_ev     = " << E_total_ev           << " eV (computed)" << std::endl;
-            std::cout << "ML E_framework_ev = " << cached_E_framework_ev << " eV (cached)" << std::endl;
-            std::cout << "ML E_adsorbate_ev = " << cached_E_adsorbate_ev << " eV (cached)" << std::endl;
-        }
-
-        return E_total_ev - cached_E_framework_ev - cached_E_adsorbate_ev;
+        // Python returns HG = E(fw+ads) - E_fw_cached - E(ads) directly
+        double HG_ev = PredictFromSocket(xyz_total.data(), types_total.data(),
+                                         n_total, (int32_t)(100 + ads_comp), 1);
+        printf("ML HG_ev = %.6f eV\n", HG_ev);
+        return HG_ev;
     }
 
     /* Clean shutdown */
@@ -574,6 +569,10 @@ struct Socket
         UCBox.Cell[0] /= Ncell.x; UCBox.Cell[1]  = 0.0;     UCBox.Cell[2]  = 0.0;
         UCBox.Cell[3] /= Ncell.y; UCBox.Cell[4] /= Ncell.y; UCBox.Cell[5]  = 0.0;
         UCBox.Cell[6] /= Ncell.z; UCBox.Cell[7] /= Ncell.z; UCBox.Cell[8] /= Ncell.z;
+        printf("UCBox cell matrix (Angstrom):\n");
+        printf("  [ %12.6f  %12.6f  %12.6f ]\n", UCBox.Cell[0], UCBox.Cell[1], UCBox.Cell[2]);
+        printf("  [ %12.6f  %12.6f  %12.6f ]\n", UCBox.Cell[3], UCBox.Cell[4], UCBox.Cell[5]);
+        printf("  [ %12.6f  %12.6f  %12.6f ]\n", UCBox.Cell[6], UCBox.Cell[7], UCBox.Cell[8]);
         inverse_matrix(UCBox.Cell, &UCBox.InverseCell);
     }
 
@@ -592,11 +591,14 @@ struct Socket
         //During the initialization phase, for adsorbate atoms, exclude those that are NOT considered in DNN.
         //Still assuming one adsorbate species, do it only for adsorbate
         if(comp != 0)
-        for(size_t i = 0; i < NAtoms; i++)
-            if(ConsiderThisAdsorbateAtom[i])
-            DNN_Molsize += 1;
-
-        if(comp != 0) UCAtoms[comp].size = DNN_Molsize;
+        {
+            size_t dnn_size = 0;
+            for(size_t i = 0; i < NAtoms; i++)
+                if(ConsiderThisAdsorbateAtom[i])
+                    dnn_size++;
+            DNN_Molsize = dnn_size;          // store for any other readers, but do NOT accumulate across components
+            UCAtoms[comp].size = dnn_size;   // use local count directly
+        }
         AllocateUCSpace(comp);
 
         size_t update_i = 0;
@@ -610,106 +612,6 @@ struct Socket
         if(i < 5 || i > (NAtoms - 5)) printf("Component %zu, Atom %zu, xyz %f %f %f, Type %zu, SymbolIndex %zu\n", comp, i, UCAtoms[comp].pos[i].x, UCAtoms[comp].pos[i].y, UCAtoms[comp].pos[i].z, HostAtoms.Type[i], UCAtoms[comp].Type[i]);
         update_i ++;
         }
-    }
-    
-    void ReplicateAtomsPerComponent(size_t comp, bool Allocate)
-    {
-        //Get Fractional positions//
-        std::vector<double3>fpos;
-        for(size_t i = 0; i < UCAtoms[comp].size; i++)
-        {
-        fpos.push_back(GetFractionalCoord(UCBox.InverseCell, UCBox.Cubic, UCAtoms[comp].pos[i]));
-        }
-
-        size_t NTotalCell = static_cast<size_t>(NReplicacell.x * NReplicacell.y * NReplicacell.z);
-        double3 Shift = {(double)1/NReplicacell.x, (double)1/NReplicacell.y, (double)1/NReplicacell.z};
-        if(NReplicacell.x % 2 == 0) throw std::runtime_error("Ncell in x needs to be an odd number (so that original unit cell sits in the center\n");
-        if(NReplicacell.y % 2 == 0) throw std::runtime_error("Ncell in y needs to be an odd number (so that original unit cell sits in the center\n");
-        if(NReplicacell.z % 2 == 0) throw std::runtime_error("Ncell in z needs to be an odd number (so that original unit cell sits in the center\n");
-        int Minx = (NReplicacell.x - 1)/2 * -1; int Maxx = (NReplicacell.x - 1)/2;
-        int Miny = (NReplicacell.y - 1)/2 * -1; int Maxy = (NReplicacell.y - 1)/2;
-        int Minz = (NReplicacell.z - 1)/2 * -1; int Maxz = (NReplicacell.z - 1)/2;
-        std::vector<int>xs; std::vector<int>ys; std::vector<int>zs;
-        xs.push_back(0);
-        ys.push_back(0);
-        zs.push_back(0);
-        for(int i = Minx; i <= Maxx; i++)
-        if(i != 0)
-            xs.push_back(i);
-        for(int i = Miny; i <= Maxy; i++)
-        if(i != 0)
-            ys.push_back(i);
-        for(int i = Minz; i <= Maxz; i++)
-        if(i != 0)
-            zs.push_back(i);
-
-        if(Allocate)
-        {
-        ReplicaAtoms[comp].pos   = (double3*) malloc(NTotalCell * UCAtoms[comp].size * sizeof(double3));
-        ReplicaAtoms[comp].Type  = (size_t*)  malloc(NTotalCell * UCAtoms[comp].size * sizeof(size_t));
-        }
-        size_t counter = 0;
-        for(size_t a = 0; a < static_cast<size_t>(NReplicacell.x); a++)
-        for(size_t b = 0; b < static_cast<size_t>(NReplicacell.y); b++)
-            for(size_t c = 0; c < static_cast<size_t>(NReplicacell.z); c++)
-            {
-            int ix = xs[a];
-            int jy = ys[b];
-            int kz = zs[c];
-            //printf("a: %zu, ix: %d, b: %zu, jy: %d, c: %zu, kz: %d\n", a, ix, b, jy, c, kz);
-            double3 NCellID = {(double) ix, (double) jy, (double) kz};
-            for(size_t i = 0; i < UCAtoms[comp].size; i++)
-            {
-                double3 temp = {fpos[i].x + NCellID.x, 
-                                fpos[i].y + NCellID.y,
-                                fpos[i].z + NCellID.z};
-                double3 super_fpos = {temp.x * Shift.x, 
-                                    temp.y * Shift.y, 
-                                    temp.z * Shift.z};
-                // Get real xyz from fractional xyz //
-                double3 Replica_pos;
-                Replica_pos.x = super_fpos.x*ReplicaBox.Cell[0]+super_fpos.y*ReplicaBox.Cell[3]+super_fpos.z*ReplicaBox.Cell[6];
-                Replica_pos.y = super_fpos.x*ReplicaBox.Cell[1]+super_fpos.y*ReplicaBox.Cell[4]+super_fpos.z*ReplicaBox.Cell[7];
-                Replica_pos.z = super_fpos.x*ReplicaBox.Cell[2]+super_fpos.y*ReplicaBox.Cell[5]+super_fpos.z*ReplicaBox.Cell[8];
-                ReplicaAtoms[comp].pos[counter]   = Replica_pos;
-                ReplicaAtoms[comp].Type[counter]  = UCAtoms[comp].Type[i];
-                counter ++;
-            }
-            }
-        ReplicaAtoms[comp].size = NTotalCell * UCAtoms[comp].size;
-    }
-    
-    //For Single Unit cell atoms, we separate them into different components//
-    //For replica, we also do that//
-    void GenerateReplicaCells(bool Allocate)
-    {
-        size_t NComp = UCAtoms.size();
-        size_t N_UCAtom = 0; for(size_t comp = 0; comp < NComp; comp++) N_UCAtom += UCAtoms[comp].size;
-
-        if (!ReplicaBox.Cell)   // ✅ ensure exists ALWAYS
-        {
-            ReplicaBox.Cell        = (double*) malloc(9 * sizeof(double));
-            ReplicaBox.InverseCell = (double*) malloc(9 * sizeof(double));
-        }
-
-        if(Allocate)
-        {
-        ReplicaAtoms.resize(UCAtoms.size());
-        ReplicaBox.Cell = (double*) malloc(9 * sizeof(double));
-        ReplicaBox.InverseCell = (double*) malloc(9 * sizeof(double));
-        for(size_t i = 0; i < 9; i++) ReplicaBox.Cell[i] = UCBox.Cell[i];
-    
-        ReplicaBox.Cell[0] *= NReplicacell.x; ReplicaBox.Cell[1] *= 0.0;            ReplicaBox.Cell[2] *= 0.0;
-        ReplicaBox.Cell[3] *= NReplicacell.y; ReplicaBox.Cell[4] *= NReplicacell.y; ReplicaBox.Cell[5] *= 0.0;
-        ReplicaBox.Cell[6] *= NReplicacell.z; ReplicaBox.Cell[7] *= NReplicacell.z; ReplicaBox.Cell[8] *= NReplicacell.z;
-
-        printf("a: %f, b: %f, c: %f\n", ReplicaBox.Cell[0], ReplicaBox.Cell[4], ReplicaBox.Cell[8]);
-        inverse_matrix(ReplicaBox.Cell, &ReplicaBox.InverseCell);
-        }
-        //Assuming Framework fixed//
-        for(size_t comp = 0; comp < UCAtoms.size(); comp++)
-        if(Allocate || comp != 0)
-            ReplicateAtomsPerComponent(comp, Allocate);
     }
     
     void WrapSuperCellAtomIntoUCBox(size_t comp)
@@ -741,13 +643,80 @@ struct Socket
         }
     }
 
+    // Wrap a single Cartesian position into the primary unit cell [0,1) fractional range.
+    double3 WrapPositionIntoUCBox(double3 pos)
+    {
+        double3 fpos = GetFractionalCoord(UCBox.InverseCell, UCBox.Cubic, pos);
+        double3 flr  = {floor(fpos.x), floor(fpos.y), floor(fpos.z)};
+        double3 nfpos = {fpos.x - flr.x, fpos.y - flr.y, fpos.z - flr.z};
+        return GetRealCoordFromFractional(UCBox.Cell, UCBox.Cubic, nfpos);
+    }
+
+    // Called from PATCH_SOCKET_FXNMAIN (DNN_Prediction_Total).
+    // Sends fw + all N adsorbate molecules in a single socket call.
+    // Python returns HG = E(fw+N_ads) - E_fw_cached - E(N_ads together).
+    // C++ multiplies by DNNEnergyConversion.
+    //
+    // host_positions : HostSystem[ads_comp].pos  (full simulation box coords, host ptr)
+    // full_molsize   : Moleculesize[ads_comp]     (including fictional charge sites)
+    // consider_atom  : ConsiderThisAdsorbateAtom  (length = full_molsize)
+    // Returns energy already converted to gRASPA internal units (10 J/mol).
+    double PredictTotal(size_t ads_comp, size_t n_mol, size_t full_molsize,
+                        double3* host_positions, bool* consider_atom,
+                        double DNNEnergyConversion)
+    {
+        if (n_mol == 0) return 0.0;
+
+        size_t n_fw        = UCAtoms[0].size;
+        size_t mol_size    = DNN_Molsize;            // atoms per molecule after filtering
+        size_t n_ads_total = n_mol * mol_size;
+        size_t n_total     = n_fw + n_ads_total;
+
+        std::vector<double>  xyz(3 * n_total);
+        std::vector<int32_t> types(n_total);
+
+        // Framework atoms (pre-computed, stable)
+        size_t counter = 0;
+        for (size_t i = 0; i < n_fw; i++) {
+            xyz[3*counter+0] = UCAtoms[0].pos[i].x;
+            xyz[3*counter+1] = UCAtoms[0].pos[i].y;
+            xyz[3*counter+2] = UCAtoms[0].pos[i].z;
+            types[counter]   = (int32_t)UCAtoms[0].Type[i];
+            counter++;
+        }
+
+        // All adsorbate molecules — wrap each atom into UCBox
+        for (size_t i = 0; i < n_mol; i++) {
+            size_t type_i = 0;
+            for (size_t j = 0; j < full_molsize; j++) {
+                if (!consider_atom[j]) continue;
+                size_t atom_idx  = i * full_molsize + j;
+                double3 wrapped  = WrapPositionIntoUCBox(host_positions[atom_idx]);
+                xyz[3*counter+0] = wrapped.x;
+                xyz[3*counter+1] = wrapped.y;
+                xyz[3*counter+2] = wrapped.z;
+                types[counter]   = (int32_t)UCAtoms[ads_comp].Type[type_i];
+                counter++;
+                type_i++;
+            }
+        }
+
+        int32_t config_type_val = (int32_t)(100 + ads_comp);
+        // Python returns HG = E(fw+N_ads) - E_fw_cached - E(N_ads together)
+        double HG_ev = PredictFromSocket(xyz.data(), types.data(), n_total,
+                                         config_type_val, (int32_t)n_mol);
+
+        printf("ML PredictTotal: n_mol=%zu  HG=%.6f eV\n", n_mol, HG_ev);
+
+        return HG_ev * DNNEnergyConversion;
+    }
+
     //This function is called after the position of the trial adsorbate molecule is prepared in UCAtoms//
     double MCEnergyWrapper(size_t comp, bool Initialize, double DNNEnergyConversion)
     {
         WrapSuperCellAtomIntoUCBox(comp);
-        GenerateReplicaCells(Initialize);
 
-        double DNN_E = Predict();
+        double DNN_E = Predict(comp);
         //This generates the unit of eV, convert to 10J/mol.
         //https://www.weizmann.ac.il/oc/martin/tools/hartree.html
         return DNN_E * DNNEnergyConversion;
