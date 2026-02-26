@@ -372,6 +372,7 @@ struct ReinsertionMove
 
     if(!FF.noCharges && SystemComponents.hasPartialCharge[SelectedComponent])
       Update_Vector_Ewald(Sims.Box, false, SystemComponents, SelectedComponent);
+    //###PATCH_SOCKET_COMMIT_REINSERTION###//
     //energy.print();
   }
   MoveEnergy Run(Variables& Vars, size_t systemId)

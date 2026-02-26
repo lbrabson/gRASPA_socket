@@ -6,4 +6,9 @@ PATCH_SOCKET_VARIABLES
   Socket DNN;
 
 PATCH_SOCKET_H
+// Forward declaration so commit helpers in mc_utilities.h / move_struct.h
+// can call this function (defined in DNN_HostGuest_Energy_Functions.h / VDW_Coulomb.cu).
+void Check_DNNAtom_and_copy_pos_to_UCAtoms(double3* temp_pos, Atoms& UCAtoms,
+                                            bool* ConsiderThisAdsorbateAtom,
+                                            size_t Molsize);
 #include "ase_energy_client.h"

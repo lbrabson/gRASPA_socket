@@ -306,6 +306,7 @@ inline void AcceptTranslation(Variables& Vars, size_t systemId)
   {
     Update_Vector_Ewald(Sims.Box, false, SystemComponents, SelectedComponent);
   }
+  //###PATCH_SOCKET_COMMIT_MOVE###//
 }
 
 ////////////////////////////////////////////////
@@ -382,6 +383,7 @@ inline void AcceptInsertion(Variables& Vars, CBMC_Variables& InsertionVariables,
   {
     Update_Vector_Ewald(Sims.Box, false, SystemComponents, SelectedComponent);
   }
+  //###PATCH_SOCKET_COMMIT_INSERT###//
 }
 
 inline void AcceptDeletion(Variables& Vars, size_t systemId, int MoveType)
@@ -414,6 +416,7 @@ inline void AcceptDeletion(Variables& Vars, size_t systemId, int MoveType)
     //Since the fractional molecule is moved to the place of the selected deleted molecule, update fractional molecule ID on host
     SystemComponents.Lambda[SelectedComponent].FractionalMoleculeID = SystemComponents.TempVal.molecule;
   }
+  //###PATCH_SOCKET_COMMIT_DELETE###//
 }
 
 //////////////////////////////////////////////////

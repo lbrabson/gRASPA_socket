@@ -17,9 +17,23 @@
 //   N   (1, 2, ...)        : adsorbate-only for component N
 //   100+N (101, 102, ...)  : total (framework + adsorbate component N)
 enum ConfigType : int32_t {
-    CONFIG_FRAMEWORK = 0,
+    CONFIG_FRAMEWORK  = 0,
     // adsorbate-only:  use ads_comp directly (1, 2, ...)
-    // total:           use 100 + ads_comp (101, 102, ...)
+    // total (old):     use 100 + ads_comp (101, 102, ...)
+
+    // N-body delta query: config_type = 200 + ads_comp
+    //   mol_idx = -1  : insertion trial
+    //   mol_idx >= 0  : move or deletion (distinguished by n_mol: 1=move, 0=deletion)
+    DELTA_QUERY_BASE  = 200,
+
+    // Commit messages: notify server of accepted move so it can update stored config
+    COMMIT_INSERT     = 300,   // append new molecule
+    COMMIT_DELETE     = 301,   // swap-with-last delete mol_idx
+    COMMIT_MOVE       = 302,   // update mol_idx position
+    SYNC_FULL         = 303,   // full resync of one adsorbate component
+
+    // Total energy query (for Check_Simulation_Energy / DNN_Prediction_Total)
+    QUERY_TOTAL       = 500,
 };
 
 struct Socket
@@ -309,6 +323,106 @@ struct Socket
         return 0;
     }
 
+    /* Extended send: identical to send_positions but inserts mol_idx [int32]
+       immediately after config_type in the wire payload.  Used by all N-body
+       messages (DELTA_QUERY, COMMIT_*, SYNC_FULL, QUERY_TOTAL).
+       Pass n_atoms=0 and nullptr for xyz/types when there is no position payload. */
+    int send_positions_extended(const double *xyz, const int32_t *types,
+                                size_t n_atoms, int32_t config_type,
+                                int32_t n_mol, int32_t mol_idx)
+    {
+        char header[12];
+
+        // 1. Wait for STATUS
+        read_all(header, 12);
+        if (strncmp(header, "STATUS", 6) != 0) {
+            fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
+            return -1;
+        }
+
+        // 2. Send READY
+        send_header("READY");
+
+        // 3. Wait for POSDATA
+        read_all(header, 12);
+        if (strncmp(header, "POSDATA", 7) != 0) {
+            fprintf(stderr, "Expected POSDATA, got: %.12s\n", header);
+            return -1;
+        }
+
+        // 4. config_type routing tag
+        send_int32(config_type);
+
+        // 5. mol_idx (NEW field distinguishing insertion/move/deletion)
+        send_int32(mol_idx);
+
+        // 6. Cell matrix (9 doubles)
+        write_all(UCBox.Cell, sizeof(double) * 9);
+
+        // 7. Inverse cell (zeroed)
+        double inv_cell[9] = {0};
+        write_all(inv_cell, sizeof(double) * 9);
+
+        // 8. n_mol
+        send_int32(n_mol);
+
+        // 9. n_atoms
+        send_int32((int32_t)n_atoms);
+
+        // 10. Types + positions (omitted when n_atoms == 0)
+        if (n_atoms > 0) {
+            std::vector<int32_t> types_net(n_atoms);
+            for (size_t i = 0; i < n_atoms; i++)
+                types_net[i] = htonl((uint32_t)types[i]);
+            write_all(types_net.data(), sizeof(int32_t) * n_atoms);
+            write_all(xyz, sizeof(double) * 3 * n_atoms);
+        }
+
+        // 11. Wait for STATUS
+        read_all(header, 12);
+        if (strncmp(header, "STATUS", 6) != 0) {
+            fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
+            return -1;
+        }
+
+        // 12. Send HAVEDATA
+        send_header("HAVEDATA");
+
+        // 13. Wait for GETFORCE
+        read_all(header, 12);
+        if (strncmp(header, "GETFORCE", 8) != 0) {
+            fprintf(stderr, "Expected GETFORCE, got: %.12s\n", header);
+            return -1;
+        }
+
+        return 0;
+    }
+
+    /* Extended predict: uses send_positions_extended + receive_energy.
+       Returns the raw energy in eV (caller applies unit conversion). */
+    double PredictFromSocketExtended(const double* xyz, const int32_t* types,
+                                     size_t n_atoms, int32_t config_type,
+                                     int32_t n_mol, int32_t mol_idx)
+    {
+        if (fd < 0) {
+            fprintf(stderr, "Socket not connected — attempting auto-connect\n");
+            if (connect_socket() < 0) {
+                fprintf(stderr, "FATAL: Cannot connect to ML server\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        printf("[CLIENT_EXT] config_type=%d mol_idx=%d n_mol=%d natoms=%zu\n",
+               (int)config_type, (int)mol_idx, (int)n_mol, n_atoms);
+        fflush(stdout);
+
+        send_positions_extended(xyz, types, n_atoms, config_type, n_mol, mol_idx);
+
+        double energy_ev;
+        receive_energy(&energy_ev);
+        return energy_ev;
+    }
+
     int receive_energy(double *energy_ev)
     {
         char header[12];
@@ -431,6 +545,137 @@ struct Socket
                                          n_total, (int32_t)(100 + ads_comp), 1);
         printf("ML HG_ev = %.6f eV\n", HG_ev);
         return HG_ev;
+    }
+
+    // =========================================================================
+    // N-body socket HG energy functions
+    // =========================================================================
+
+    /* QueryDelta — compute ΔE for a trial MC move in the full N-ads context.
+       Server holds the current accepted configuration and returns E(trial) - E_current.
+
+       For non-deletion moves, UCAtoms[ads_comp].pos must already be set
+       (via Check_DNNAtom_and_copy_pos_to_UCAtoms) before calling this function.
+
+       move_type : INSERTION, DELETION, TRANSLATION (or any non-DELETION for move)
+       mol_idx   : -1 for insertion; mol index for move or deletion
+       Returns energy in gRASPA internal units (multiply by DNNEnergyConversion). */
+    double QueryDelta(int move_type, size_t ads_comp, int mol_idx,
+                      double DNNEnergyConversion)
+    {
+        int32_t config_type = (int32_t)(200 + ads_comp);
+        size_t  mol_size    = DNN_Molsize;
+
+        if (move_type == DELETION) {
+            // No position data — server removes mol_idx from stored config
+            double E_ev = PredictFromSocketExtended(nullptr, nullptr, 0,
+                                                    config_type, 0, (int32_t)mol_idx);
+            return E_ev * DNNEnergyConversion;
+        }
+
+        // Insertion or move: send trial position from UCAtoms[ads_comp]
+        std::vector<double>  xyz(3 * mol_size);
+        std::vector<int32_t> types(mol_size);
+        for (size_t i = 0; i < mol_size; i++) {
+            double3 wrapped   = WrapPositionIntoUCBox(UCAtoms[ads_comp].pos[i]);
+            xyz[3*i+0]        = wrapped.x;
+            xyz[3*i+1]        = wrapped.y;
+            xyz[3*i+2]        = wrapped.z;
+            types[i]          = (int32_t)UCAtoms[ads_comp].Type[i];
+        }
+        double E_ev = PredictFromSocketExtended(xyz.data(), types.data(), mol_size,
+                                                config_type, 1, (int32_t)mol_idx);
+        return E_ev * DNNEnergyConversion;
+    }
+
+    /* CommitInsert — tell server to append the just-accepted molecule.
+       UCAtoms[ads_comp].pos must already be set to the accepted position. */
+    void CommitInsert(size_t ads_comp)
+    {
+        size_t mol_size = DNN_Molsize;
+        std::vector<double>  xyz(3 * mol_size);
+        std::vector<int32_t> types(mol_size);
+        for (size_t i = 0; i < mol_size; i++) {
+            double3 wrapped = WrapPositionIntoUCBox(UCAtoms[ads_comp].pos[i]);
+            xyz[3*i+0]      = wrapped.x;
+            xyz[3*i+1]      = wrapped.y;
+            xyz[3*i+2]      = wrapped.z;
+            types[i]        = (int32_t)UCAtoms[ads_comp].Type[i];
+        }
+        PredictFromSocketExtended(xyz.data(), types.data(), mol_size,
+                                  (int32_t)COMMIT_INSERT, 1, -1);
+    }
+
+    /* CommitDelete — tell server to swap-delete mol_idx from its stored config. */
+    void CommitDelete(size_t ads_comp, int mol_idx)
+    {
+        PredictFromSocketExtended(nullptr, nullptr, 0,
+                                  (int32_t)COMMIT_DELETE, 0, (int32_t)mol_idx);
+    }
+
+    /* CommitMove — tell server to update mol_idx to the new accepted position.
+       UCAtoms[ads_comp].pos must already be set to the new accepted position. */
+    void CommitMove(size_t ads_comp, int mol_idx)
+    {
+        size_t mol_size = DNN_Molsize;
+        std::vector<double>  xyz(3 * mol_size);
+        std::vector<int32_t> types(mol_size);
+        for (size_t i = 0; i < mol_size; i++) {
+            double3 wrapped = WrapPositionIntoUCBox(UCAtoms[ads_comp].pos[i]);
+            xyz[3*i+0]      = wrapped.x;
+            xyz[3*i+1]      = wrapped.y;
+            xyz[3*i+2]      = wrapped.z;
+            types[i]        = (int32_t)UCAtoms[ads_comp].Type[i];
+        }
+        PredictFromSocketExtended(xyz.data(), types.data(), mol_size,
+                                  (int32_t)COMMIT_MOVE, 1, (int32_t)mol_idx);
+    }
+
+    /* SyncFull — resync the full adsorbate configuration for one component.
+       Called once per adsorbate component after CreateMolecule_InOneBox.
+       host_positions : HostSystem[ads_comp].pos  (all N molecules concatenated)
+       full_molsize   : Moleculesize[ads_comp]     (including fictional charge sites)
+       consider_atom  : ConsiderThisAdsorbateAtom  (length = full_molsize) */
+    void SyncFull(size_t ads_comp, size_t n_mol, size_t full_molsize,
+                  double3* host_positions, bool* consider_atom)
+    {
+        if (n_mol == 0) return;
+
+        size_t mol_size = DNN_Molsize;
+        size_t n_total  = n_mol * mol_size;
+        std::vector<double>  xyz(3 * n_total);
+        std::vector<int32_t> types(n_total);
+
+        size_t counter = 0;
+        for (size_t i = 0; i < n_mol; i++) {
+            size_t type_i = 0;
+            for (size_t j = 0; j < full_molsize; j++) {
+                if (!consider_atom[j]) continue;
+                size_t atom_idx = i * full_molsize + j;
+                double3 wrapped = WrapPositionIntoUCBox(host_positions[atom_idx]);
+                xyz[3*counter+0] = wrapped.x;
+                xyz[3*counter+1] = wrapped.y;
+                xyz[3*counter+2] = wrapped.z;
+                types[counter]   = (int32_t)UCAtoms[ads_comp].Type[type_i];
+                counter++;
+                type_i++;
+            }
+        }
+        printf("[SYNC_FULL] comp=%zu n_mol=%zu total_atoms=%zu\n",
+               ads_comp, n_mol, n_total);
+        PredictFromSocketExtended(xyz.data(), types.data(), n_total,
+                                  (int32_t)SYNC_FULL, (int32_t)n_mol, (int32_t)ads_comp);
+    }
+
+    /* QueryTotal — return E_current - E_fw_cached (= total HG energy with all ads).
+       Used by DNN_Prediction_Total / Check_Simulation_Energy.
+       Returns energy in gRASPA internal units. */
+    double QueryTotal(double DNNEnergyConversion)
+    {
+        double E_ev = PredictFromSocketExtended(nullptr, nullptr, 0,
+                                               (int32_t)QUERY_TOTAL, 0, 0);
+        printf("[QUERY_TOTAL] E_total_ev=%.6f\n", E_ev);
+        return E_ev * DNNEnergyConversion;
     }
 
     /* Clean shutdown */

@@ -1,5 +1,115 @@
 # Changelog
 
+## 2026-02-25 — N-body socket HG energy scheme
+
+**Summary:** The socket path's host-guest energy evaluation has been upgraded from a
+1-body to an N-body scheme. Previously, each MC move evaluated E_HG for a single
+adsorbate against the bare framework in isolation: `E_HG = E(fw + 1 mol) - E_fw - E_ads`.
+This misses many-body contributions from adsorbates already present in the box (framework
+polarization, adsorbate–adsorbate interactions captured by the ML model, etc.).
+
+The physically correct quantity for each MC move is:
+- **Insertion**: `ΔE = E(fw + N_ads + mol_new) − E(fw + N_ads)`
+- **Deletion**: `ΔE = E(fw + N_ads − mol_del) − E(fw + N_ads)`
+- **Translation/Rotation/Reinsertion**: `ΔE = E(fw + N_ads with mol at new_pos) − E(fw + N_ads)`
+
+**Design:** The Python server maintains the current accepted configuration
+(`ads_config[comp]` = list of accepted molecule positions per adsorbate component) and
+`E_current = E(fw + all ads)`. Per move: C++ sends one trial molecule's coordinates →
+server returns `ΔE = E(trial_config) − E_current`. On acceptance: C++ sends a COMMIT
+message → server updates `ads_config` and `E_current`. On rejection: no message needed
+(server state is already consistent with C++ state).
+
+### Wire Protocol Extensions
+
+New `send_positions_extended()` function inserts `mol_idx [int32]` immediately after
+`config_type` in the POSDATA payload for all `config_type ≥ 200`.
+
+New config_type values:
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| `200 + comp` | `DELTA_QUERY_BASE` | Return `ΔE = E(trial_config) − E_current` for adsorbate `comp` |
+| `300` | `COMMIT_INSERT` | Append new mol to server's `ads_config`; recompute `E_current` |
+| `301` | `COMMIT_DELETE` | Swap-with-last delete `mol_idx` from server's `ads_config`; recompute `E_current` |
+| `302` | `COMMIT_MOVE` | Update `mol_idx` position in server's `ads_config`; recompute `E_current` |
+| `303` | `SYNC_FULL` | Replace entire adsorbate component config (post-CreateMolecule prime) |
+| `500` | `QUERY_TOTAL` | Return `E_current − E_fw_cached` (for FxnMain energy check) |
+
+### Sign Convention (CBMC Deletion)
+
+`QueryDelta(DELETION)` returns `E(N-1) − E(N)` which is **positive** for a bound molecule.
+CBMC conventions expect `DNN_New` to be **negative** (binding energy convention). The
+CBMC deletion patch therefore negates the result: `DNN_New = -QueryDelta(DELETION, ...)`.
+For `SINGLE_DELETION`, the delta convention is already consistent (positive ΔE = cost to
+remove); no negation is applied.
+
+### Changes
+
+1. **`src_clean/ase_energy_client.h`** — Extended `ConfigType` enum with new values:
+   `DELTA_QUERY_BASE = 200`, `COMMIT_INSERT = 300`, `COMMIT_DELETE = 301`,
+   `COMMIT_MOVE = 302`, `SYNC_FULL = 303`, `QUERY_TOTAL = 500`.
+   Added `send_positions_extended()` which inserts `mol_idx [int32]` after `config_type`
+   in the POSDATA payload. Added new public methods: `QueryDelta()`, `CommitInsert()`,
+   `CommitDelete()`, `CommitMove()`, `SyncFull()`, `QueryTotal()`. Existing `Predict()`
+   and `MCEnergyWrapper()` are retained (still used by startup validation and FxnMain
+   fallback path).
+
+2. **`src_clean/mc_utilities.h`** — Added patch markers at the end of `AcceptTranslation`,
+   `AcceptInsertion`, and `AcceptDeletion`: `//###PATCH_SOCKET_COMMIT_MOVE###//`,
+   `//###PATCH_SOCKET_COMMIT_INSERT###//`, `//###PATCH_SOCKET_COMMIT_DELETE###//`.
+
+3. **`src_clean/move_struct.h`** — Added `//###PATCH_SOCKET_COMMIT_REINSERTION###//` at
+   the end of `ReinsertionMove::Acceptance`, after `Update_Reinsertion_data` kernel.
+
+4. **`src_clean/main.cpp`** — Added `//###PATCH_SOCKET_POST_CREATEMOL###//` between
+   `CreateMolecule_InOneBox` and `Check_Simulation_Energy` to call `SyncFull` for each
+   adsorbate component after initial molecule placement.
+
+5. **`socket-patch/Socket/PATCH_SOCKET_DNN_HostGuest_Energy_Functions.h.txt`** — All
+   five move patches replaced to use `QueryDelta()` instead of `MCEnergyWrapper()`.
+   `PATCH_SOCKET_FXNMAIN` replaced per-molecule loop with a single `QueryTotal()` call.
+
+6. **`socket-patch/Socket/PATCH_SOCKET_mc_utilities.h.txt`** *(new file)* — Contains
+   `PATCH_SOCKET_COMMIT_MOVE`, `PATCH_SOCKET_COMMIT_INSERT`, `PATCH_SOCKET_COMMIT_DELETE`
+   patches that call `CommitMove`, `CommitInsert`, `CommitDelete` on acceptance.
+
+7. **`socket-patch/Socket/PATCH_SOCKET_move_struct.h.txt`** *(new file)* — Contains
+   `PATCH_SOCKET_COMMIT_REINSERTION` which calls `CommitMove` on accepted reinsertion.
+
+8. **`socket-patch/Socket/PATCH_SOCKET_main.cpp.txt`** — Added `PATCH_SOCKET_POST_CREATEMOL`
+   section: calls `SyncFull` for each adsorbate component using `HostSystem[comp].pos`
+   after `CreateMolecule_InOneBox` completes.
+
+9. **`socket-patch/Socket/PATCH_SOCKET_data_struct.h.txt`** — Added forward declaration
+   for `Check_DNNAtom_and_copy_pos_to_UCAtoms` in the `PATCH_SOCKET_H` section. This is
+   needed because the function is defined in `VDW_Coulomb.cu` but the commit patches in
+   `mc_utilities.h` and `move_struct.h` compile in `axpy.cu`'s translation unit.
+
+### Server Changes Required
+
+The Python server (`ase_ipi_server_mace.py`) must implement the server-side state machine:
+- Maintain `ads_config[comp]` = list of accepted mol position arrays per adsorbate component
+- Maintain `E_current` = E(fw + all ads), recomputed after every COMMIT
+- New handlers dispatched by `config_type`:
+  - `200+comp` → `handle_delta_query`: return `E(trial_config) − E_current`
+  - `300` → `handle_commit_insert`: append mol; recompute `E_current`
+  - `301` → `handle_commit_delete`: swap-with-last pop of `mol_idx`; recompute `E_current`
+  - `302` → `handle_commit_move`: update `mol_idx` to new position; recompute `E_current`
+  - `303` → `handle_sync_full`: replace entire component config; recompute `E_current`
+  - `500` → `handle_query_total`: return `E_current − E_fw_cached`
+- Mol-index ordering must mirror C++ `d_a[comp]`: delete uses swap-with-last matching
+  `Update_deletion_data_Parallel`
+
+### Drift Check Note
+
+The drift check (`Check_DNN_Drift`) compares `DNN_E` (now a many-body marginal) against
+the classical 1-body HGVDW. The many-body correction will be larger by construction for
+systems with significant adsorbate–adsorbate or polarization effects. Users must set
+`MaxDNNDrift` large enough that legitimate many-body corrections are not rejected.
+
+---
+
 ## 2026-02-24 — Remove SocketReplicaCell: send UCBox directly to MACE
 
 **Summary:** The supercell replication mechanism (`ReplicaAtoms`, `ReplicaBox`,

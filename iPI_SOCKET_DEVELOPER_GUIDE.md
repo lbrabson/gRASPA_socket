@@ -21,18 +21,31 @@
 18. [Allegro vs Socket/ASE: Energy Calculation Differences](#allegro-vs-socketase-energy-calculation-differences)
 19. [Per-Move Energy Breakdown and Atoms Involved](#per-move-energy-breakdown-and-atoms-involved)
 20. [Data Structures for DNN Atomic Positions](#data-structures-for-dnn-atomic-positions)
+21. [MC → Energy Call Flow and the N-body Scheme](#mc--energy-call-flow-and-the-n-body-scheme)
 
 ---
 
 ## 1. Overview
 
-gRASPA uses an **i-PI socket protocol** to offload host-guest interaction energy calculations to an external machine-learning server (CHGNet via ASE). The C++ simulation engine acts as a **socket client**, sending atomic configurations over a UNIX domain socket and receiving predicted energies. This replaces (or supplements) classical force-field host-guest energy during Monte Carlo moves.
+gRASPA uses an **i-PI socket protocol** to offload host-guest interaction energy calculations to an external machine-learning server (e.g. MACE via ASE). The C++ simulation engine acts as a **socket client**, sending atomic configurations over a UNIX domain socket and receiving predicted energies. This replaces (or supplements) classical force-field host-guest energy during Monte Carlo moves.
 
-**Key design choice:** The energy is decomposed as:
+**Key design choice — N-body delta-query scheme:** The server maintains the current
+accepted configuration of all adsorbates and the corresponding total energy `E_current`.
+Per MC move, C++ sends one trial molecule's coordinates; the server returns:
 ```
-E_interaction = E_total(framework+adsorbate) - E_framework - E_adsorbate
+ΔE = E(fw + all_ads + trial_mol) − E_current
 ```
-E_framework and E_adsorbate are **cached after the first evaluation** (both are constant for a rigid framework + replicated rigid molecule), so subsequent calls require only **1 socket round-trip** for E_total.
+On acceptance, C++ sends a COMMIT message; the server updates its stored configuration
+and recomputes `E_current`. On rejection, no message is needed — server state already
+mirrors C++ state.
+
+This design correctly captures many-body contributions (adsorbate–adsorbate interactions
+mediated by the ML model, framework polarization) that the previous 1-body scheme
+`E_HG = E(fw + 1 mol) − E_fw − E_ads` missed entirely.
+
+**Framework cache:** At startup, C++ sends the framework-only configuration
+(`config_type = 0`). The server evaluates and caches `E_fw`. `E_current` is initialized
+to `E_fw` (zero adsorbates). The framework cache is never invalidated during the run.
 
 ---
 
@@ -143,7 +156,10 @@ runtime (e.g. `n_mol = (natoms - n_fw) / DNN_Molsize`).
 ### Per-evaluation data exchange
 
 > **Note:** The POSDATA payload extends the standard iPI format. Fields added by
-> gRASPA are `config_type` (sent before the cell matrix), `n_mol`, and `types`.
+> gRASPA are `config_type` (sent before the cell matrix), `n_mol`, `types`, and
+> (for `config_type ≥ 200`) `mol_idx`.
+
+### Standard format (`config_type < 200`)
 
 ```
 Client                              Server
@@ -156,8 +172,8 @@ cell[9 doubles] -->
 inv_cell[9 doubles, zeroed] -->
 n_mol [int32, network order] -->
 natoms [int32, network order] -->
-types[natoms × int32, network order] -->
-positions[3*natoms doubles] -->
+types[natoms × int32, network order] -->   (absent if natoms=0)
+positions[3*natoms doubles] -->             (absent if natoms=0)
                     <-- STATUS
 HAVEDATA -->
                     <-- GETFORCE
@@ -170,10 +186,45 @@ HAVEDATA -->
                     <-- extras[extras_len bytes]
 ```
 
-`config_type` values: `0` = framework only, `1..N` = adsorbate-only for component N,
-`100+N` = total (framework + adsorbate N). The server returns the **host-guest
-interaction energy** `E(fw+ads) - E_fw_cached - E(ads)` directly; gRASPA makes
-exactly **one socket call per MC move**.
+### Extended format (`config_type ≥ 200`) — N-body delta-query and commit
+
+For all N-body messages, `mol_idx [int32]` is inserted immediately after `config_type`:
+
+```
+config_type [int32, network order] -->
+mol_idx     [int32, network order] -->   ← NEW: −1 for insertions; mol index otherwise
+cell[9 doubles] -->
+inv_cell[9 doubles, zeroed] -->
+n_mol [int32, network order] -->
+natoms [int32, network order] -->
+types[natoms × int32, network order] -->
+positions[3*natoms doubles] -->
+```
+
+### `config_type` values
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| `0` | `CONFIG_FRAMEWORK` | Framework only; server caches `E_fw` |
+| `1..N` | — | Adsorbate-only for component N (startup validation only) |
+| `100+N` | — | Total (framework + adsorbate N); old 1-body path (startup validation) |
+| `200+comp` | `DELTA_QUERY_BASE` | Return `ΔE = E(trial_config) − E_current` |
+| `300` | `COMMIT_INSERT` | Append new mol; recompute `E_current` |
+| `301` | `COMMIT_DELETE` | Swap-with-last delete `mol_idx`; recompute `E_current` |
+| `302` | `COMMIT_MOVE` | Update `mol_idx` to new position; recompute `E_current` |
+| `303` | `SYNC_FULL` | Replace entire component config; recompute `E_current` |
+| `500` | `QUERY_TOTAL` | Return `E_current − E_fw_cached` |
+
+**DELTA_QUERY** (200+comp): For insertion/move, `n_mol=1`, `natoms=DNN_Molsize` with trial
+positions. For deletion, `n_mol=0`, `natoms=0` (no position data). Server returns ΔE as
+the energy scalar in FORCEREADY.
+
+**COMMIT messages** (300–303): Server returns dummy `0.0` energy via FORCEREADY; return
+value is discarded by C++.
+
+**SYNC_FULL** (303): `mol_idx` = adsorbate component index; `n_mol` = total molecule
+count for this component; `natoms` = `n_mol × DNN_Molsize`; all molecules concatenated
+in flat order.
 
 Forces and virial are **read but not used** by gRASPA (protocol compliance only).
 
@@ -212,21 +263,41 @@ struct Socket {
 
 ### Key Methods
 
+**Connection and setup:**
+
 | Method | Purpose |
 |--------|---------|
 | `init(path, n_atoms)` | Set socket path and initial atom count |
-| `connect_socket()` | Open UNIX socket, handshake, send species map, prime server cache |
-| `send_positions(xyz, types, n, config_type, n_mol)` | Full POSDATA exchange (config_type + cell + types + atoms, all network byte order) |
+| `connect_socket()` | Open UNIX socket, handshake, send species map, prime server cache, call SyncFull (if molecules present) |
+| `send_positions(xyz, types, n, config_type, n_mol)` | Standard POSDATA exchange (config_type < 200) |
+| `send_positions_extended(xyz, types, n, config_type, n_mol, mol_idx)` | Extended POSDATA exchange with `mol_idx` field (config_type ≥ 200) |
 | `receive_energy(energy_ev)` | Read FORCEREADY response |
-| `PredictFromSocket(xyz, types, n, config_type, n_mol)` | Send coords, get energy back (eV); auto-connects if `fd < 0` |
-| `PrimeFrameworkCache()` | Send framework-only config (`config_type=0`); server computes and caches E_fw |
+| `PredictFromSocket(xyz, types, n, config_type, n_mol)` | Send coords via standard format, get energy back (eV) |
+| `PredictFromSocketExtended(xyz, types, n, config_type, n_mol, mol_idx)` | Send coords via extended format, get energy back (eV) |
+| `PrimeFrameworkCache()` | Send framework-only config (`config_type=0`); server computes and caches E_fw, initializes E_current = E_fw |
 | `send_species_map()` | Send element symbols over the wire immediately after handshake |
-| `Predict(ads_comp)` | Build combined fw+ads xyz array, call `PredictFromSocket(config_type=100+ads_comp)`; server returns HG energy directly |
-| `MCEnergyWrapper(comp, init, conv)` | Wrap UCAtoms into UCBox + Predict() + unit convert |
-| `CopyAtomsFromFirstUnitcell(...)` | Extract UC atoms, filter fictional sites |
-| `WrapSuperCellAtomIntoUCBox(comp)` | PBC wrapping via fractional coords |
 | `close_socket()` | Send EXIT command, close fd (call explicitly if needed; no destructor) |
 | `Match_Element_PseudoAtom_with_model(PA)` | Map pseudo-atoms to element symbols |
+| `CopyAtomsFromFirstUnitcell(...)` | Extract UC atoms, filter fictional sites |
+| `WrapSuperCellAtomIntoUCBox(comp)` | PBC wrapping via fractional coords |
+
+**N-body delta-query and commit (per MC move):**
+
+| Method | Purpose |
+|--------|---------|
+| `QueryDelta(move_type, ads_comp, mol_idx, DNNEnergyConversion)` | Send trial config; receive `ΔE = E(trial) − E_current` in internal units. For deletion: `mol_idx` = mol to remove, no positions sent. For insertion: `mol_idx = −1`. For move: `mol_idx` = moving molecule. |
+| `CommitInsert(ads_comp)` | Commit accepted insertion to server; server appends mol, recomputes E_current |
+| `CommitDelete(ads_comp, mol_idx)` | Commit accepted deletion; server swap-with-last removes mol_idx, recomputes E_current |
+| `CommitMove(ads_comp, mol_idx)` | Commit accepted translation/rotation/reinsertion; server updates mol_idx position, recomputes E_current |
+| `SyncFull(ads_comp, n_mol, full_molsize, host_positions, consider_atom)` | Full configuration resync: send all N molecules for a component; server replaces stored config, recomputes E_current |
+| `QueryTotal(DNNEnergyConversion)` | Return `E_current − E_fw_cached` in internal units (used for FxnMain total-energy check) |
+
+**Legacy methods (kept for startup validation):**
+
+| Method | Purpose |
+|--------|---------|
+| `Predict(ads_comp)` | Build combined fw+ads xyz array, call `PredictFromSocket(config_type=100+ads_comp)`; server returns 1-body HG energy. Used at startup for validation tests only. |
+| `MCEnergyWrapper(comp, init, conv)` | Wrap UCAtoms into UCBox + Predict() + unit convert. Used at startup for validation tests only. |
 
 ### Robust I/O
 
@@ -262,21 +333,38 @@ while (left > 0) {
   - Copy framework + adsorbate atoms into `UCAtoms`
   - `WrapSuperCellAtomIntoUCBox(0)` — wrap framework atoms into UCBox (explicit step)
   - `connect_socket()` — handshake, send species map over wire, prime server E_fw cache
-  - First test `Predict()` call
-  - Second test with displaced atoms via `MCEnergyWrapper(1, false, ...)`
+  - First test `Predict()` call (1-body, startup validation only)
+  - Second test with displaced atoms via `MCEnergyWrapper(1, false, ...)` (startup validation only)
+- **After `CreateMolecule_InOneBox` (patched):** `SyncFull()` for each adsorbate component
+  — primes server `ads_config` and recomputes `E_current = E(fw + initial_ads)` before
+  the MC loop begins.
 
 ### `DNN_HostGuest_Energy_Functions.h`
-All MC move types are handled:
+All MC move types are handled via N-body delta queries:
 
 | Move Type | Patch Name | What it does |
 |-----------|-----------|--------------|
-| INSERTION | `PATCH_SOCKET_INSERTION` | `cudaMemcpy` trial pos → filter → `MCEnergyWrapper()` |
-| DELETION | `PATCH_SOCKET_DELETION` | Same flow for deletion candidate |
-| TRANSLATION/ROTATION | `PATCH_SOCKET_SINGLE` | Evaluate both old & new pos, return `E_new - E_old` |
-| SINGLE_INSERTION | `PATCH_SOCKET_SINGLE` | Only evaluates new (skips old) |
-| SINGLE_DELETION | `PATCH_SOCKET_SINGLE` | Only evaluates old (skips new) |
-| REINSERTION | `PATCH_SOCKET_REINSERTION` | Evaluate trial + original, return delta |
-| Total energy | `PATCH_SOCKET_FXNMAIN` | Loop over all molecules in component 1, sum energies |
+| INSERTION (CBMC) | `PATCH_SOCKET_INSERTION` | `cudaMemcpy` trial pos → `Check_DNNAtom_and_copy_pos_to_UCAtoms` → `QueryDelta(INSERTION, comp, -1)`. Result = DNN_New. |
+| DELETION (CBMC) | `PATCH_SOCKET_DELETION` | `QueryDelta(DELETION, comp, mol_idx)`. **Negated**: `DNN_New = -QueryDelta(...)` (see sign convention). |
+| TRANSLATION/ROTATION | `PATCH_SOCKET_SINGLE` | `QueryDelta(TRANSLATION, comp, mol_idx, new_pos)`. DNN_Old = 0. Returned ΔE = `E(new)−E_current` with old pos already in server state. |
+| SINGLE_INSERTION | `PATCH_SOCKET_SINGLE` | `QueryDelta(INSERTION, comp, -1)`. DNN_Old = 0. |
+| SINGLE_DELETION | `PATCH_SOCKET_SINGLE` | `QueryDelta(DELETION, comp, mol_idx)`. DNN_Old = 0. (No negation — SINGLE convention.) |
+| REINSERTION | `PATCH_SOCKET_REINSERTION` | `QueryDelta(TRANSLATION, comp, mol_idx, new_pos)`. DNN_Old = 0. |
+| Total energy | `PATCH_SOCKET_FXNMAIN` | Single `QueryTotal()` call; returns `E_current − E_fw_cached` summed over all adsorbates. |
+
+### `mc_utilities.h`
+Commit patches fire on acceptance, after GPU arrays are updated:
+
+| Accept Function | Patch Name | What it does |
+|-----------------|-----------|--------------|
+| `AcceptTranslation` | `PATCH_SOCKET_COMMIT_MOVE` | `cudaMemcpy` accepted pos → `CommitMove(comp, mol_idx)` |
+| `AcceptInsertion` | `PATCH_SOCKET_COMMIT_INSERT` | `cudaMemcpy` last mol slot → `CommitInsert(comp)` |
+| `AcceptDeletion` | `PATCH_SOCKET_COMMIT_DELETE` | `CommitDelete(comp, mol_idx)` |
+
+### `move_struct.h`
+| Accept Function | Patch Name | What it does |
+|-----------------|-----------|--------------|
+| `ReinsertionMove::Acceptance` | `PATCH_SOCKET_COMMIT_REINSERTION` | `cudaMemcpy` accepted pos → `CommitMove(comp, mol_idx)` |
 
 ### `fxn_main.h`
 - **Lines ~341-346:** `DNN_Prediction_Total()` called during `Check_Simulation_Energy()`
@@ -291,6 +379,8 @@ Filters atoms using `ConsiderThisAdsorbateAtom[]` boolean array (excludes fictio
 
 The codebase uses a text-marker patching approach. Each marker in `src_clean` corresponds to a patch file in `socket-patch/Socket/`:
 
+**Energy evaluation patches (DNN_HostGuest_Energy_Functions.h):**
+
 | Marker in `src_clean` | Patch File | Target File |
 |-----------------------|-----------|-------------|
 | `###PATCH_SOCKET_DATA_STRUCT_H###` | `PATCH_SOCKET_data_struct.h.txt` | `data_struct.h` |
@@ -298,12 +388,26 @@ The codebase uses a text-marker patching approach. Each marker in `src_clean` co
 | `###PATCH_SOCKET_READDATA_H###` | `PATCH_SOCKET_read_data.h.txt` | `read_data.h` |
 | `###PATCH_SOCKET_MAIN_READMODEL###` | `PATCH_SOCKET_main.cpp.txt` | `main.cpp` |
 | `###PATCH_SOCKET_MAIN_PREP###` | `PATCH_SOCKET_main.cpp.txt` | `main.cpp` |
+| `###PATCH_SOCKET_POST_CREATEMOL###` | `PATCH_SOCKET_main.cpp.txt` | `main.cpp` |
 | `###PATCH_SOCKET_CONSIDER_DNN_ATOMS###` | `PATCH_SOCKET_DNN_HostGuest_Energy_Functions.h.txt` | `DNN_HostGuest_Energy_Functions.h` |
 | `###PATCH_SOCKET_INSERTION###` | (same file) | `DNN_HostGuest_Energy_Functions.h` |
 | `###PATCH_SOCKET_DELETION###` | (same file) | `DNN_HostGuest_Energy_Functions.h` |
 | `###PATCH_SOCKET_SINGLE###` | (same file) | `DNN_HostGuest_Energy_Functions.h` |
 | `###PATCH_SOCKET_REINSERTION###` | (same file) | `DNN_HostGuest_Energy_Functions.h` |
 | `###PATCH_SOCKET_FXNMAIN###` | (same file) | `DNN_HostGuest_Energy_Functions.h` |
+
+**Commit patches (acceptance callbacks — N-body scheme):**
+
+| Marker in `src_clean` | Patch File | Target File |
+|-----------------------|-----------|-------------|
+| `###PATCH_SOCKET_COMMIT_MOVE###` | `PATCH_SOCKET_mc_utilities.h.txt` | `mc_utilities.h` |
+| `###PATCH_SOCKET_COMMIT_INSERT###` | `PATCH_SOCKET_mc_utilities.h.txt` | `mc_utilities.h` |
+| `###PATCH_SOCKET_COMMIT_DELETE###` | `PATCH_SOCKET_mc_utilities.h.txt` | `mc_utilities.h` |
+| `###PATCH_SOCKET_COMMIT_REINSERTION###` | `PATCH_SOCKET_move_struct.h.txt` | `move_struct.h` |
+
+**Patch file naming convention:** `PATCH_SOCKET_<source_filename>.txt`. `patch.py` strips
+the `PATCH_SOCKET_` prefix to determine the target source file. Multiple patch sections
+can live in a single `.txt` file (each section headed by the marker name).
 
 **To apply patches:** Replace each `//###PATCH_SOCKET_*###//` line with the corresponding snippet. The `patch_Socket/` directory contains the already-patched result.
 
@@ -336,51 +440,87 @@ Hardcoded to `/tmp/ase_ipi_socket` in the `Socket` struct default. The Python se
 
 ## 9. Energy Calculation Strategy
 
-The host-guest interaction energy is computed as:
+### N-body delta-query scheme (current)
+
+The energy returned to gRASPA for each MC move is the **many-body marginal energy**:
 
 ```
-E_host_guest = E_total(fw + ads) - E_framework(fw) - E_adsorbate(ads)
+ΔE = E(fw + all_N_ads + trial_mol) − E(fw + all_N_ads)   [insertion/move]
+ΔE = E(fw + all_N_ads − mol_del)   − E(fw + all_N_ads)   [deletion]
 ```
 
-### Design: Server-side decomposition, 1 call per MC move
+This is physically exact: it accounts for all adsorbate–adsorbate interactions and
+framework polarization captured by the ML model.
 
-The three-call decomposition is handled **entirely on the Python server side**.
-The C++ client makes **exactly one socket call per energy evaluation**:
+### Server-side state machine
 
+The server maintains:
 ```
-C++ client (per MC move):
-  1. Build xyz_total = framework atoms + adsorbate atoms (UCAtoms, unit cell only)
-  2. PredictFromSocket(xyz_total, config_type = 100 + ads_comp, n_mol = 1)
-     --> Python server returns HG = E_total - E_fw_cached - E_ads  (1 round-trip)
-  3. Convert eV -> 10J/mol
-
-Python server (per evaluation with config_type >= 100):
-  A. Compute E_total(fw + ads)           (fresh MACE evaluation)
-  B. Retrieve E_fw from server-side cache (set at startup by PrimeFrameworkCache())
-  C. Compute E_ads(ads only)             (fresh MACE evaluation)
-  D. Return HG = E_total - E_fw - E_ads
+ads_config[comp]  = list of accepted molecule position arrays for component comp
+E_current         = E(fw + all ads in ads_config), updated after every COMMIT
+E_fw_cached       = E(fw alone), computed once at startup and never changed
 ```
+
+**Per move (C++ → server):**
+```
+1. Prepare trial positions for 1 molecule in UCAtoms[comp]
+2. QueryDelta(move_type, comp, mol_idx, DNNEnergyConversion)
+   → send_positions_extended(config_type = 200+comp, mol_idx, trial_xyz, ...)
+   → server computes E(trial_config), returns ΔE = E(trial_config) − E_current
+3. Convert eV → 10 J/mol → DNN_E
+```
+
+**On acceptance (C++ → server, 1 additional socket call):**
+```
+CommitInsert(comp)        → config_type=300: server appends mol, recomputes E_current
+CommitDelete(comp, idx)   → config_type=301: server swap-deletes idx, recomputes E_current
+CommitMove(comp, idx)     → config_type=302: server updates idx, recomputes E_current
+```
+
+**On rejection:** No message sent. Server state unchanged = consistent with C++ state.
 
 ### Framework cache priming (at startup)
 
-`connect_socket()` calls `PrimeFrameworkCache()` immediately after sending the
-species map. This sends `config_type=0` (framework only) so the server can compute
-and cache `E_fw` once before the MC loop begins. The cache is never invalidated
-(framework is rigid throughout the simulation).
+`connect_socket()` calls `PrimeFrameworkCache()` after sending the species map. This
+sends `config_type=0` (framework only); the server computes and stores `E_fw_cached` and
+initializes `E_current = E_fw_cached` (zero adsorbates).
+
+After `CreateMolecule_InOneBox`, `SyncFull()` is called for each adsorbate component to
+prime `ads_config` and bring `E_current` up to `E(fw + initial_ads)`.
 
 ### Per-move socket call count
 
-After the startup prime:
+| Move type | DELTA_QUERY calls | COMMIT calls (on accept) | Total (accept / reject) |
+|-----------|-------------------|--------------------------|-------------------------|
+| Translation/Rotation | 1 | 1 (COMMIT_MOVE) | 2 / 1 |
+| Insertion (CBMC/single) | 1 | 1 (COMMIT_INSERT) | 2 / 1 |
+| Deletion (CBMC/single) | 1 | 1 (COMMIT_DELETE) | 2 / 1 |
+| Reinsertion | 1 | 1 (COMMIT_MOVE) | 2 / 1 |
+| Total energy (FxnMain) | 1 (QUERY_TOTAL) | — | 1 |
 
-| Move type | Socket calls (C++ side) |
-|-----------|------------------------|
-| Translation/Rotation | 2 (one for old config, one for new config) |
-| Insertion | 1 (new config only) |
-| Deletion | 1 (old config only) |
-| Reinsertion | 2 (old + new) |
+Each DELTA_QUERY triggers one MACE forward pass on the server (trial_config). Each
+COMMIT triggers one MACE forward pass to recompute `E_current`. The framework cache
+is always reused.
 
-Each of those "1 call" figures triggers **2 internal MACE evaluations** on the
-server (E_total + E_ads). The framework cache (E_fw) is always reused.
+### Mol-index ordering invariant
+
+Server mol ordering for each component mirrors C++ `d_a[comp]`:
+- **Insert:** both append new molecule at index N (new last slot)
+- **Delete mol_idx:** both use swap-with-last then decrement N, matching
+  `Update_deletion_data_Parallel` in gRASPA's GPU kernel
+
+Violation of this invariant would cause the server to compute energies for wrong
+molecule configurations on subsequent moves.
+
+### Previous scheme (1-body, now startup-validation only)
+
+The old scheme evaluated the interaction energy for one adsorbate in isolation:
+```
+E_HG = E(fw + 1 mol) − E_fw_cached − E(1 mol alone)
+```
+This is computed by `Predict(ads_comp)` which makes 2 socket calls per evaluation
+(config_type=100+comp for the combined system, config_type=comp for the adsorbate alone).
+It is still called at startup for validation tests but is no longer used in the MC loop.
 
 ---
 
@@ -425,21 +565,36 @@ The server startup is carefully sequenced to avoid deadlocks with gRASPA:
 3. Accept connection from gRASPA
 4. do_handshake()                        (STATUS → NEEDINIT → INIT)
 5. recv_species_map()                    (species info sent over wire by gRASPA)
-6. recv_prime_framework()               (config_type=0 call; compute and cache E_fw)
+6. recv_prime_framework()               (config_type=0 call; compute and cache E_fw;
+                                          initialize E_current = E_fw, ads_config = {})
 7. serve() main loop                     (STATUS → READY → POSDATA → ...)
+   - config_type=303: SyncFull → set ads_config[comp], recompute E_current
+   - config_type=200+comp: delta query → return E(trial_config) − E_current
+   - config_type=300: commit insert → append mol, recompute E_current
+   - config_type=301: commit delete → swap-with-last remove, recompute E_current
+   - config_type=302: commit move → update position, recompute E_current
+   - config_type=500: query total → return E_current − E_fw_cached
 ```
 
-Species information now arrives over the wire immediately after the handshake
+Species information arrives over the wire immediately after the handshake
 (`recv_species_map()`). There is no species file to poll. On reconnection, the
-species data and framework cache are re-established via the same startup sequence.
+species data, framework cache, and adsorbate config are re-established via the same
+startup sequence (gRASPA calls `SyncFull` before the MC loop begins).
 
 ### Key Functions
 
 | Function | Purpose |
 |----------|---------|
 | `do_handshake(conn, cell)` | Perform iPI handshake (STATUS/NEEDINIT/INIT) |
-| `recv_species_map(conn)` | Receive element symbols sent by C++ client after handshake; build `config_map` |
-| `serve(conn, calc, config_map, cell)` | Main protocol loop; routes each eval by `config_type`; performs 2-call decomposition server-side |
+| `recv_species_map(conn)` | Receive element symbols; build `config_map` |
+| `recv_prime_framework(conn, calc, config_map)` | Handle config_type=0; compute and cache E_fw; set E_current = E_fw |
+| `serve(conn, calc, config_map, cell)` | Main protocol loop; dispatch by config_type; manage ads_config and E_current |
+| `handle_delta_query(comp, mol_idx, trial_xyz)` | Compute E(trial_config) − E_current; return ΔE |
+| `handle_commit_insert(comp, xyz)` | Append mol to ads_config[comp]; recompute E_current |
+| `handle_commit_delete(comp, mol_idx)` | Swap-with-last remove from ads_config[comp]; recompute E_current |
+| `handle_commit_move(comp, mol_idx, xyz)` | Update ads_config[comp][mol_idx]; recompute E_current |
+| `handle_sync_full(comp, n_mol, xyz)` | Replace ads_config[comp] entirely; recompute E_current |
+| `handle_query_total()` | Return E_current − E_fw_cached |
 
 ### Typical Launch Script (`gcmc_mace.bash`)
 
@@ -468,37 +623,53 @@ rm -f "${SOCKET_PATH}"                                # Cleanup
 Server side:
   S1. Load ML model
   S2. Bind + listen on /tmp/ase_ipi_socket
-  S3. Accept connection (blocks until gRASPA connects at step 7)
+  S3. Accept connection (blocks until gRASPA connects at step C7)
   S4. do_handshake() — STATUS → NEEDINIT → INIT
-  S5. recv_species_map() — species info arrives over wire (sent by gRASPA at step 8)
-  S6. serve() main loop — handles POSDATA requests
+  S5. recv_species_map() — species info arrives over wire
+  S6. recv_prime_framework() — config_type=0; compute and cache E_fw;
+                               initialize E_current = E_fw, ads_config = {}
+  S7. serve() main loop — handles all POSDATA requests
 
 gRASPA side:
-  1. Parse simulation.input -> UseSocket = true, DNNEnergyConversion = 9648.53...
-  2. ReadSocketModelParameters() -> DNNModelName, MaxDNNDrift
-  3. Match pseudo-atoms to element symbols
-  4. Copy framework atoms into DNN.UCAtoms[0]
-  5. Copy adsorbate template into DNN.UCAtoms[1]
-  6. WrapSuperCellAtomIntoUCBox(0) -> wrap framework into UCBox (explicit step)
-  7. connect_socket():
-       a. do_ipi_handshake() (server at step S4)
-       b. send_species_map() over wire (server at step S5)
-       c. PrimeFrameworkCache() -> config_type=0 call; server caches E_fw
-  8. First test Predict() call
-  9. Second test with displaced atoms via MCEnergyWrapper(1, false, ...)
- 10. Begin MC simulation loop:
-     a. Select MC move type
-     b. Generate trial configuration (GPU)
-     c. cudaMemcpy trial positions to host
-     d. Filter atoms via ConsiderThisAdsorbateAtom[]
-     e. WrapSuperCellAtomIntoUCBox(comp) -> wrap adsorbate into UCBox
-     f. Copy to DNN.UCAtoms
-     g. MCEnergyWrapper() -> Predict() -> 1 socket call (server does 2-call decomp)
-     h. Convert eV -> 10J/mol
-     i. Check drift against MaxDNNDrift
-     j. Metropolis acceptance/rejection
-     k. Update system state
- 11. Process exits -> OS reclaims socket fd (no destructor; Socket is copied during init)
+  C1.  Parse simulation.input -> UseSocket = true, DNNEnergyConversion = 9648.53...
+  C2.  ReadSocketModelParameters() -> DNNModelName, MaxDNNDrift
+  C3.  Match pseudo-atoms to element symbols
+  C4.  Copy framework atoms into DNN.UCAtoms[0]
+  C5.  Copy adsorbate template into DNN.UCAtoms[1]
+  C6.  WrapSuperCellAtomIntoUCBox(0) -> wrap framework into UCBox (explicit step)
+  C7.  connect_socket():
+         a. do_ipi_handshake() (server at S4)
+         b. send_species_map() over wire (server at S5)
+         c. PrimeFrameworkCache() -> config_type=0; server caches E_fw (server at S6)
+  C8.  Startup validation: first test Predict() call (1-body, logs to stdout)
+  C9.  Startup validation: second test via MCEnergyWrapper(1, false, ...)
+  C10. CreateMolecule_InOneBox() -> places initial adsorbate molecules
+  C11. SyncFull() for each adsorbate component:
+         - config_type=303; sends all initial mol positions
+         - Server sets ads_config[comp], recomputes E_current = E(fw + initial_ads)
+  C12. Check_Simulation_Energy() -> calls QueryTotal() -> server returns E_current - E_fw
+  C13. Begin MC simulation loop (per move):
+         a. Select MC move type and molecule
+         b. Generate trial configuration (GPU)
+         c. cudaMemcpy trial positions to host
+         d. Check_DNNAtom_and_copy_pos_to_UCAtoms() -> filter + pack into UCAtoms[comp]
+         e. WrapSuperCellAtomIntoUCBox(comp) -> PBC-wrap into UCBox
+         f. DNN_Prediction_Move() ->
+              QueryDelta(move_type, comp, mol_idx, DNNEnergyConversion)
+                → config_type=200+comp with mol_idx and trial positions
+                → server returns ΔE = E(trial_config) − E_current
+              DNN_Replace_Energy(): store classical HG terms, zero them, set DNN_E = ΔE
+              Check_DNN_Drift(): if |DNN_E - classical_HG_sum| > MaxDNNDrift → reject
+         g. Metropolis acceptance/rejection
+         h. If ACCEPTED:
+              Update GPU arrays (Update_deletion_data_Parallel, etc.)
+              CommitXxx() -> config_type=300/301/302 with accepted position
+                → server updates ads_config[comp], recomputes E_current
+            If REJECTED:
+              No socket message; server state unchanged
+  C14. Check_Simulation_Energy() calls QueryTotal() -> server returns E_current - E_fw
+       (used for periodic energy drift monitoring)
+  C15. Process exits -> OS reclaims socket fd
 ```
 
 ---
@@ -648,6 +819,23 @@ The `cache_valid` flag in `Socket` is set to `true` after the first `E_framework
 ## 16. Changelog
 
 All changes are listed in reverse chronological order (most recent first). Items marked **[PENDING]** are included in this release but may require further testing or validation.
+
+---
+
+### N-body socket HG energy scheme
+
+**Date:** 2026-02-25
+**Files:** `src_clean/ase_energy_client.h`, `src_clean/mc_utilities.h`,
+`src_clean/move_struct.h`, `src_clean/main.cpp`,
+`socket-patch/Socket/PATCH_SOCKET_DNN_HostGuest_Energy_Functions.h.txt`,
+`socket-patch/Socket/PATCH_SOCKET_mc_utilities.h.txt` *(new)*,
+`socket-patch/Socket/PATCH_SOCKET_move_struct.h.txt` *(new)*,
+`socket-patch/Socket/PATCH_SOCKET_main.cpp.txt`,
+`socket-patch/Socket/PATCH_SOCKET_data_struct.h.txt`
+
+Upgraded the socket energy scheme from 1-body (single adsorbate vs bare framework) to
+N-body (true many-body marginal energy accounting for all adsorbates and polarization
+effects). See Section 9 for full design and CHANGELOG.md for details.
 
 ---
 
@@ -1023,33 +1211,48 @@ The model is called **1–2 times per MC step** (once for old state, once for ne
 
 ### 18.2 Socket/ASE (MACE, CHGNet, etc.)
 
-ASE calculators expose energy via `get_potential_energy()`, which returns a **single total energy scalar** with no per-atom decomposition. To recover the host-guest interaction energy, the socket client in `ase_energy_client.h::Predict()` performs an explicit three-call decomposition:
+ASE calculators expose energy via `get_potential_energy()`, which returns a **single total energy scalar** with no per-atom decomposition. The socket path uses an **N-body delta-query scheme** where the server maintains the full accepted configuration and returns the marginal energy for each trial move.
 
+**Per MC move (production path):**
 ```
-E_total = PredictFromSocket(fw_atoms + ads_atoms,  config_type = 100 + comp)
-E_fw    = PredictFromSocket(fw_atoms,               config_type = 0)          ← cached
-E_ads   = PredictFromSocket(ads_atoms,              config_type = comp)
-return E_total − E_fw − E_ads
+C++ calls QueryDelta(comp, mol_idx, trial_xyz)
+  → send_positions_extended(config_type=200+comp, mol_idx, trial_xyz, ...)
+  → server computes E(trial_config) = MACE.get_potential_energy(fw + all_ads + trial_mol)
+  → server returns ΔE = E(trial_config) − E_current
 ```
 
-The `config_type` int32 tag (sent as a 4-byte prefix before the position data in the i-PI protocol) routes each call server-side:
+**On acceptance:**
+```
+C++ calls CommitXxx(comp, mol_idx)
+  → server updates ads_config[comp], recomputes E_current (1 MACE call)
+```
 
-| `config_type` | Meaning |
-|---|---|
-| `0` | Framework atoms only |
-| `N` (1, 2, …) | Adsorbate component N only |
-| `100 + N` | Combined: framework + adsorbate component N |
+The `config_type` int32 tag routes each call server-side:
 
-The framework energy `E_fw` is computed once and stored in `cached_E_framework_ev`. Subsequent calls reuse the cached value as long as `cache_valid` is true. This reduces the number of socket round-trips per MC step to **2 (translation/rotation)** or **3 (insertion/deletion, where the adsorbate-only energy is also needed)**.
+| `config_type` | Meaning | mol_idx field |
+|---|---|---|
+| `0` | Framework only (startup cache) | — |
+| `N` (1, 2, …) | Adsorbate N only (startup validation) | — |
+| `100 + N` | Combined: fw + ads N (startup validation) | — |
+| `200 + N` | Delta query for adsorbate N (production MC) | yes |
+| `300` | Commit insert | yes |
+| `301` | Commit delete | yes |
+| `302` | Commit move | yes |
+| `303` | Sync full (resync entire component) | yes (= comp) |
+| `500` | Query total energy | — |
+
+This design requires **2 MACE forward passes per accepted MC move** (1 for the delta query + 1 for the commit to recompute E_current) and **1 MACE pass per rejected move** (delta query only). The old 1-body scheme required 2 MACE passes per delta-energy move type regardless of acceptance.
 
 ### 18.3 Comparison
 
 | Feature | Allegro | Socket/ASE |
 |---|---|---|
 | Model output | `atomic_energy[N, 1]` per atom | `get_potential_energy()` scalar |
-| HG energy derivation | Implicit: fw cancels in delta; constant offset in absolute | Explicit: `E_total − E_fw − E_ads` |
-| Framework energy | Re-evaluated every call | Computed once, cached |
-| Model calls per MC step | 1–2 | 2–3 |
+| HG energy derivation | Implicit: fw cancels in delta; framework offset in absolute | Explicit: `ΔE = E(trial) − E_current` (N-body marginal) |
+| Many-body contributions | Captured implicitly via per-atom sum | Captured via server-maintained full-system state |
+| Framework energy | Re-evaluated every call (cancels in delta) | Cached at startup; never re-evaluated |
+| MACE calls per accepted move | 1–2 | 2 (delta query + commit) |
+| MACE calls per rejected move | 1 | 1 (delta query only) |
 | Suitable models | Allegro, NequIP (per-atom output required) | Any ASE calculator (MACE, CHGNet, SevenNet, M3GNet, …) |
 | Unit of raw output | eV (from model metadata) | eV (from ASE) |
 | Conversion applied | `× DNNEnergyConversion` | `× DNNEnergyConversion` |
@@ -1082,20 +1285,39 @@ DNN_Correction() = DNN_E − (storedHGVDW + storedHGReal + storedHGEwaldE)
 
 This measures the discrepancy between the DNN prediction and the classical host-guest energy. If `|DNN_Correction()| > DNNDrift` (set by `MaxDNNDrift` in `simulation.input`, default 100000.0 internal units), the move is **unconditionally rejected** and the outlier configuration is written to `DNN/Outliers_*.data` for diagnostics.
 
-### 19.3 Per-move table
+### 19.3 Per-move table (socket N-body scheme)
 
-In all cases, only **one adsorbate molecule at a time** is passed to the DNN, together with the **full framework** (via the UCAtoms/ReplicaAtoms supercell). Only atoms selected by `ConsiderThisAdsorbateAtom` are included.
+In all cases, only **one adsorbate molecule at a time** is sent as the trial position.
+`ConsiderThisAdsorbateAtom` filtering applies before the positions are packed into
+`UCAtoms[comp]`. The server's stored `ads_config` provides the N-body context implicitly.
 
-| Move type | `DNN_New` source | `DNN_Old` source | Returned value | Notes |
-|---|---|---|---|---|
-| Translation | `Sims.New.pos` | `Sims.Old.pos` | `DNN_New − DNN_Old` | Framework cancels in difference |
-| Rotation | `Sims.New.pos` | `Sims.Old.pos` | `DNN_New − DNN_Old` | Framework cancels in difference |
-| Reinsertion | `temp` GPU buffer | `Sims.Old.pos` | `DNN_New − DNN_Old` | `temp` holds trial reinserted positions |
-| Insertion (CBMC/single) | `Sims.Old.pos`* | — (0) | `DNN_New` | Framework self-energy cancels in acceptance ratio |
-| Deletion | `Sims.Old.pos` | — (0) | `DNN_New` | Symmetric with insertion |
-| Total energy (all molecules) | `HostSystem[comp].pos` per mol | — | Σ over all molecules | Called once per molecule; used for energy reporting |
+| Move type | Trial pos source | mol_idx | DNN_New | DNN_Old | DNN_E used in MC |
+|---|---|---|---|---|---|
+| Translation | `Sims.New.pos` | moving mol | QueryDelta result | 0 | DNN_New (ΔE from server) |
+| Rotation | `Sims.New.pos` | moving mol | QueryDelta result | 0 | DNN_New |
+| Reinsertion | `d_a[comp].pos` after kernel | moving mol | QueryDelta result | 0 | DNN_New |
+| Insertion (CBMC) | `Sims.Old.pos`* | −1 | QueryDelta result | 0 | DNN_New |
+| Deletion (CBMC) | — (no positions) | mol to delete | **−QueryDelta** | 0 | DNN_New (negated — see below) |
+| Insertion (SINGLE) | `Sims.New.pos` | −1 | QueryDelta result | 0 | DNN_New − DNN_Old |
+| Deletion (SINGLE) | — (no positions) | mol to delete | QueryDelta result | 0 | DNN_New − DNN_Old |
+| Total energy (FxnMain) | — | — | QueryTotal result | — | direct assignment |
 
-\* For insertion moves, the trial positions are staged into `Sims.Old.pos` by the `Initialize_DNN_Positions` GPU kernel before the DNN call. The naming reflects the unified scratch buffer used by the kernel, not the semantic "old state".
+\* For CBMC insertion, trial positions are staged into `Sims.Old.pos` by the
+`Initialize_DNN_Positions` GPU kernel before the DNN call. The naming reflects the
+unified scratch buffer used by the kernel, not the semantic "old state".
+
+**CBMC Deletion sign convention:** `QueryDelta(DELETION)` returns
+`E(N-1) − E(N)` = positive for a bound molecule. CBMC MC acceptance code interprets
+`DNN_New` as a binding energy (negative = favorable). The patch negates:
+```cpp
+DNN_New = -SystemComponents.DNN.QueryDelta(DELETION, SelectedComponent, mol_idx, conv);
+```
+For `SINGLE_DELETION`, the delta convention already uses unsigned change, so no negation.
+
+**Why DNN_Old = 0 for all moves:** In the N-body scheme, the server's `E_current`
+already encodes the energy with the current (old) position of the moving molecule. The
+delta query `ΔE = E(trial) − E_current` is therefore relative to the old state. Setting
+`DNN_Old = 0` and using `DNN_New = ΔE` gives the correct net change `DNN_New − DNN_Old = ΔE`.
 
 ### 19.4 Identity Swap limitation
 
@@ -1156,9 +1378,11 @@ For adsorbate components, `Allocate_size = 2 × max_atoms`. The second half of t
 
 ### 20.3 Position flow per MC step
 
+**Socket path (N-body delta-query):**
+
 ```
 GPU: Sims.Old.pos / Sims.New.pos
-     (Molsize atoms, local indices 0..Molsize-1, double3)
+     (Molsize atoms, double3)
          |
          | cudaMemcpy(DeviceToHost)
          v
@@ -1170,6 +1394,28 @@ CPU: temp_pos[]
          | packs surviving atoms densely (no gaps)
          v
 CPU: UCAtoms[comp].pos[0..DNN_Molsize-1]
+         |
+         | QueryDelta(move_type, comp, mol_idx, DNNEnergyConversion)
+         |   WrapSuperCellAtomIntoUCBox(comp)  — PBC-wrap into UCBox
+         |   send_positions_extended(config_type=200+comp, mol_idx, ...)
+         |     → server: E(trial_config) = MACE(fw + ads_config + trial_mol)
+         |     → server returns ΔE = E(trial_config) − E_current
+         |   × DNNEnergyConversion
+         v
+double DNN_E = ΔE  (internal units: 10 J/mol)
+
+On acceptance:
+         |
+         | CommitXxx(comp, mol_idx)
+         |   send_positions_extended(config_type=300/301/302, mol_idx, accepted_pos)
+         |     → server updates ads_config[comp]
+         |     → server recomputes E_current = MACE(fw + all_updated_ads)
+```
+
+**Allegro path (for reference):**
+
+```
+GPU: all atoms in UCAtoms[comp] + framework
          |
          | MCEnergyWrapper(comp, Initialize, DNNEnergyConversion)
          |   WrapSuperCellAtomIntoUCBox()   — PBC-wrap into unit cell
@@ -1208,3 +1454,232 @@ All tensors are built on CPU then transferred to CUDA before `Model.forward()`:
 where `N_replica_framework = NReplicacell.x × NReplicacell.y × NReplicacell.z × UCAtoms[0].size` and analogously for the adsorbate component.
 
 The atom-energy output `"atomic_energy"[N_total, 1]` is summed over one unit-cell equivalent of framework atoms plus the adsorbate atoms, with adsorbate indices remapped from the UC ordering to the replica tensor ordering before summing.
+
+---
+
+## 21. MC → Energy Call Flow and the N-body Scheme
+
+This section traces how a Monte Carlo move becomes a DNN energy evaluation, explains the
+role of `DNN_Replace_Energy` and `Check_DNN_Drift`, describes the CBMC vs. SINGLE energy
+conventions, and explains how the N-body scheme fits into this machinery.
+
+---
+
+### 21.1 General Structure: How gRASPA Handles DNN Energies
+
+gRASPA's MC acceptance machinery uses an **energy-correction model**: the DNN does not
+fully replace the force field; instead it replaces only the **host-guest (HG) interaction
+terms** while framework–framework (HH) and guest–guest (GG) remain classical. The handover
+happens via two functions called after every DNN evaluation:
+
+**`DNN_Replace_Energy()`** (called from `DNN_Prediction_Move` after the socket/Allegro call):
+```
+1. Save classical HG terms:
+     storedHGVDW   = running_energy.HGVDW
+     storedHGReal  = running_energy.HGReal
+     storedHGEwaldE = running_energy.HGEwaldE
+2. Zero the classical HG terms:
+     HGVDW = HGReal = HGEwaldE = 0
+3. Set DNN result:
+     DNN_E = (value returned by socket/Allegro call)
+```
+
+After this, the total energy in the acceptance criterion is:
+```
+E_total = HHVDW + GGVDW + HHReal + GGReal + HHEwaldE + GGEwaldE + TailE + DNN_E
+```
+The classical HG is gone from the total; DNN_E has taken its place.
+
+**`Check_DNN_Drift()`** (called immediately after `DNN_Replace_Energy`):
+```
+correction = DNN_E − (storedHGVDW + storedHGReal + storedHGEwaldE)
+if |correction| > MaxDNNDrift → unconditional reject, write outlier to DNN/Outliers_*.data
+```
+This is a sanity filter: if the DNN disagrees with the classical HG by more than
+`MaxDNNDrift` internal units, the configuration is assumed to be outside the training
+distribution and is rejected. The threshold must be set large enough to allow legitimate
+ML corrections through.
+
+---
+
+### 21.2 Two MC Energy Conventions
+
+gRASPA uses **two different conventions** for what `DNN_E` means depending on the move
+type. Understanding this is critical to interpreting socket patch code.
+
+#### CBMC moves (Insertion / Deletion via Rosenbluth sampling)
+
+CBMC builds a Rosenbluth chain by growing the molecule atom-by-atom across multiple trial
+orientations. At each growth step the **Boltzmann weight** is evaluated:
+
+```
+w_i = exp(−β × E_HG_i)
+```
+
+For CBMC, `DNN_E = DNN_New` is interpreted as an **absolute interaction energy**
+(binding energy convention): **negative = favorable binding**. The Rosenbluth weight is
+`exp(−β × DNN_New)`.
+
+- **Insertion:** Rosenbluth weight for new config = `exp(−β × DNN_New)`. DNN_New should be negative for favorable binding.
+- **Deletion:** Rosenbluth weight for reference config = `exp(−β × DNN_New)`. DNN_New should again be negative (binding energy of the molecule being deleted).
+
+#### SINGLE moves (Translation / Rotation / Single-step Insertion / Deletion)
+
+For SINGLE moves, the acceptance probability is based on the **energy change** `ΔE`:
+
+```
+P_accept = min(1, exp(−β × ΔE))   [standard Metropolis]
+```
+
+Here `DNN_E = DNN_New − DNN_Old` is the **signed energy change**: negative = move is
+energetically favorable (downhill).
+
+---
+
+### 21.3 Why the CBMC Deletion Sign Requires Special Handling
+
+With the N-body scheme, `QueryDelta(DELETION, comp, mol_idx)` returns:
+
+```
+ΔE = E(fw + N_ads − mol_del) − E(fw + N_ads) = E(N-1 config) − E(N config)
+```
+
+For a bound molecule this is **positive** (removing a molecule from its binding site costs
+energy). But CBMC convention expects `DNN_New` to be **negative** (binding energy =
+favorable). Therefore the CBMC deletion patch negates:
+
+```cpp
+DNN_New = -SystemComponents.DNN.QueryDelta(DELETION, SelectedComponent, mol_idx, conv);
+```
+
+This sign flip converts the "cost to remove" into the "binding energy of the molecule",
+which is what the Rosenbluth weight computation expects.
+
+For `SINGLE_DELETION`, no negation is needed: the single-move acceptance criterion uses
+`DNN_New − DNN_Old` directly as a signed energy change, and `QueryDelta(DELETION)` already
+gives the correct positive ΔE for that convention.
+
+---
+
+### 21.4 The 1-Body Scheme (Predecessor)
+
+The original socket patch evaluated the host-guest interaction energy for a **single
+adsorbate in isolation**, ignoring all other adsorbates:
+
+```
+E_HG(1-body) = E(fw + 1 mol) − E_fw − E(1 mol alone)
+```
+
+This is a 2-body term only: it captures the direct interaction between the adsorbate and
+the framework, but it does **not** include:
+
+- Adsorbate–adsorbate interactions mediated by the ML model
+- Framework polarization changes due to multiple adsorbates
+- Any collective many-body effects in the system
+
+In practice, for high loading GCMC simulations or systems where the ML model captures
+significant adsorbate–adsorbate correlations, this scheme introduces a systematic bias.
+
+The call pattern was:
+
+```
+MCEnergyWrapper(comp, Initialize, DNNEnergyConversion)
+  → WrapSuperCellAtomIntoUCBox(comp)
+  → Predict(ads_comp):
+      PredictFromSocket(fw_atoms + ads_atoms, config_type=100+comp)  [E_total]
+      PredictFromSocket(fw_atoms,             config_type=0)         [E_fw, cached]
+      PredictFromSocket(ads_atoms,            config_type=comp)      [E_ads, fresh]
+      return E_total − E_fw − E_ads
+```
+
+This required **2 MACE forward passes per move** (E_total + E_ads; E_fw cached). For
+SINGLE moves (translation, rotation), it required 4 passes total (new + old states each
+needing 2).
+
+---
+
+### 21.5 The N-body Scheme: What Changes
+
+The N-body scheme replaces the `MCEnergyWrapper` / `Predict` call with `QueryDelta`, and
+adds `CommitXxx` on acceptance. The structural change is minimal — `DNN_Replace_Energy`
+and `Check_DNN_Drift` are called in exactly the same way. Only the source and meaning
+of `DNN_E` changes.
+
+**What's the same:**
+- `DNN_Replace_Energy()` is still called after every move evaluation
+- `Check_DNN_Drift()` is still called; the `correction` threshold and reject logic are unchanged
+- `DNN_E` is still placed in the acceptance criterion in place of classical HG
+- `MaxDNNDrift` still guards against out-of-distribution configurations
+
+**What's different:**
+
+| Aspect | 1-body scheme | N-body scheme |
+|--------|--------------|---------------|
+| `DNN_E` represents | `E(fw + 1 mol) − E_fw − E_ads` (2-body HG) | `E(fw + N_ads + trial) − E_current` (many-body marginal) |
+| Server state | Stateless: each call is independent | Stateful: server stores all accepted adsorbate positions |
+| MACE passes per query | 2 (total + ads) | 1 (trial config) |
+| MACE passes on acceptance | 0 | 1 (recompute E_current) |
+| Many-body contributions | Missing | Fully captured |
+| `DNN_Old` for SINGLE moves | Non-zero: re-evaluate old config | Zero: old state already in E_current |
+| Translation ΔE source | `E_new_1body − E_old_1body` | `E(new_config) − E_current` (E_current includes old pos) |
+| Drift correction meaning | DNN vs classical HG (2-body) | DNN many-body marginal vs classical HG (2-body) |
+
+**Drift check with N-body:** The correction `DNN_E − storedHGVDW` now measures the
+discrepancy between the many-body marginal (which includes adsorbate–adsorbate cross terms
+captured by the ML model) and the classical 1-body HG. This will naturally be larger for
+systems with significant many-body effects. `MaxDNNDrift` must be set large enough that
+legitimate corrections are not rejected — the drift check is intended to catch numerical
+instabilities and out-of-distribution geometries, not to penalize physically meaningful
+many-body corrections.
+
+---
+
+### 21.6 Acceptance → Commit → Server State Update
+
+After an accepted move, the server must be notified so its stored configuration mirrors
+the C++ state. This is handled by the commit patches in `mc_utilities.h` and
+`move_struct.h`, which fire immediately after the GPU arrays are updated:
+
+```
+C++ acceptance path (AcceptInsertion, for example):
+  1. GPU kernel: Update_NumberOfMolecules(...)      ← GPU d_a[comp] updated
+  2. CommitInsert(comp):
+       cudaMemcpy last mol slot → host temp_pos
+       Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, UCAtoms[comp], ...)
+       send_positions_extended(config_type=300, mol_idx=-1, accepted_xyz, ...)
+         → server: ads_config[comp].append(xyz)
+         → server: E_current = MACE(fw + all_updated_ads)
+```
+
+The **mol-index ordering invariant** must be maintained:
+- `CommitInsert`: both C++ and server append new molecule at index `N` (new last slot)
+- `CommitDelete(mol_idx)`: C++ calls `Update_deletion_data_Parallel` which swaps
+  `mol_idx ← last mol` then decrements count. Server's `handle_commit_delete` must
+  perform the identical swap-with-last operation.
+
+Any break in this invariant causes the server's `ads_config[comp]` ordering to diverge
+from C++, after which all subsequent delta queries compute the wrong ΔE.
+
+---
+
+### 21.7 FxnMain Total Energy Check
+
+`Check_Simulation_Energy()` in `fxn_main.h` calls `DNN_Prediction_Total()` periodically
+to verify that accumulated `DNN_E` contributions have not drifted from a fresh evaluation.
+
+With the N-body scheme, `PATCH_SOCKET_FXNMAIN` replaces the old per-molecule loop
+(which called `MCEnergyWrapper` for each molecule individually) with a single call:
+
+```cpp
+DNN_E = SystemComponents.DNN.QueryTotal(SystemComponents.DNNEnergyConversion);
+// → config_type=500; server returns E_current − E_fw_cached
+```
+
+`E_current` already encodes the full system energy `E(fw + all N_ads)`. Subtracting
+`E_fw_cached` gives the total host-guest contribution, directly analogous to what the
+sum-over-molecules gave in the 1-body scheme — but now including all many-body
+contributions.
+
+This also eliminates the ordering issue of the old scheme (where `MCEnergyWrapper` was
+called for each molecule independently and the per-molecule energies were summed, losing
+any cross-molecule interaction terms the ML model might capture).

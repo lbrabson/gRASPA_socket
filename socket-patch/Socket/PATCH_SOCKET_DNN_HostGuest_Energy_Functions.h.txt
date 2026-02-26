@@ -15,92 +15,70 @@ void Check_DNNAtom_and_copy_pos_to_UCAtoms(double3* temp_pos, Atoms& UCAtoms, bo
 PATCH_SOCKET_INSERTION
     if(SystemComponents.UseSocket)
     {
-      bool Initialize = false;
-      double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
+      // N-body insertion: QueryDelta returns E(N+1) - E(N) = negative for favorable binding
+      double3* temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
       cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
       Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
-//      if(SystemComponents.CURRENTCYCLE <= 30)
-//      {
-//        printf("DNN INSERTION BEFORE CHECK DNN PseudoAtoms\n");
-//        for(size_t i = 0; i < SystemComponents.Moleculesize[SelectedComponent]; i++)
-//          printf("pos: %f %f %f\n", temp_pos[i].x, temp_pos[i].y, temp_pos[i].z);
-//
-//        printf("DNN INSERTION AFTER CHECK DNN PseudoAtoms\n");
-//        for(size_t i = 0; i < SystemComponents.DNN.UCAtoms[SelectedComponent].size; i++)
-//          printf("pos: %f %f %f\n", SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].x, SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].y, SystemComponents.DNN.UCAtoms[SelectedComponent].pos[i].z);
-//      }
-      DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+      DNN_New = SystemComponents.DNN.QueryDelta(INSERTION, SelectedComponent, -1, SystemComponents.DNNEnergyConversion);
       free(temp_pos);
     }
 
 PATCH_SOCKET_DELETION
     if(SystemComponents.UseSocket)
     {
-      bool Initialize = false;
-      double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
-      cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
-      Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
-      DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
-      free(temp_pos);
+      // N-body deletion: QueryDelta returns E(N-1) - E(N) = positive for bound mol.
+      // Negate to match classical sign convention (DNN_E = -|binding| = negative).
+      int mol_idx = (int)SystemComponents.TempVal.molecule;
+      DNN_New = -SystemComponents.DNN.QueryDelta(DELETION, SelectedComponent, mol_idx, SystemComponents.DNNEnergyConversion);
     }
 
 PATCH_SOCKET_SINGLE
-    bool Do_New = true; bool Do_Old = true;
-    if(MoveType == SINGLE_INSERTION) Do_Old = false;
-    if(MoveType == SINGLE_DELETION)  Do_New = false;
     if(SystemComponents.UseSocket)
     {
-      bool Initialize = false;
-      double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
-      if(Do_New)
+      if(MoveType == SINGLE_DELETION)
       {
+        // QueryDelta returns E(N-1) - E(N) = positive for bound mol.
+        // For SINGLE_DELETION: DNN_New - DNN_Old should be positive (cost of removal).
+        // Set DNN_New = QueryDelta (positive), DNN_Old = 0.
+        int mol_idx = (int)SystemComponents.TempVal.molecule;
+        DNN_New = SystemComponents.DNN.QueryDelta(DELETION, SelectedComponent, mol_idx, SystemComponents.DNNEnergyConversion);
+        DNN_Old = 0.0;
+      }
+      else
+      {
+        // SINGLE_INSERTION, TRANSLATION, ROTATION: need new trial position
+        double3* temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
         cudaMemcpy(temp_pos, Sims.New.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
         Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
-        DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
-        //printf("DNN_New %f\n", DNN_New);
+        int mol_idx = (MoveType == SINGLE_INSERTION) ? -1 : (int)SystemComponents.TempVal.molecule;
+        // Use INSERTION for new mol, TRANSLATION (any non-DELETION) for moves
+        int query_type = (MoveType == SINGLE_INSERTION) ? INSERTION : TRANSLATION;
+        DNN_New = SystemComponents.DNN.QueryDelta(query_type, SelectedComponent, mol_idx, SystemComponents.DNNEnergyConversion);
+        DNN_Old = 0.0;
+        free(temp_pos);
       }
-      if(Do_Old)
-      {
-        cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
-        Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
-        DNN_Old = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
-        //printf("DNN_New %f\n", DNN_Old);
-      }
-      free(temp_pos);
     }
 
 PATCH_SOCKET_REINSERTION
   if(SystemComponents.UseSocket)
   {
-    bool Initialize = false;
-    double3* temp_pos; temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
-    //NEW//
+    // N-body reinsertion: QueryDelta returns E(N with mol at new_pos) - E(N with mol at old_pos).
+    // Server holds old position in E_current, so the returned ΔE already accounts for it.
+    // Set DNN_New = QueryDelta, DNN_Old = 0.
+    double3* temp_pos = (double3*) malloc(sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent]);
     cudaMemcpy(temp_pos, temp, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
     Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
-    DNN_New = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
-    //OLD//
-    cudaMemcpy(temp_pos, Sims.Old.pos, sizeof(double3) * SystemComponents.Moleculesize[SelectedComponent], cudaMemcpyDeviceToHost);
-    Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[SelectedComponent], SystemComponents.ConsiderThisAdsorbateAtom, SystemComponents.Moleculesize[SelectedComponent]);
-    DNN_Old = SystemComponents.DNN.MCEnergyWrapper(SelectedComponent, Initialize, SystemComponents.DNNEnergyConversion);
+    DNN_New = SystemComponents.DNN.QueryDelta(TRANSLATION, SelectedComponent, (int)SystemComponents.TempVal.molecule, SystemComponents.DNNEnergyConversion);
+    DNN_Old = 0.0;
     free(temp_pos);
   }
 
 PATCH_SOCKET_FXNMAIN
   if(SystemComponents.UseSocket)
   {
-    // Send ALL adsorbate molecules in a single socket call per component.
-    // PredictTotal builds fw + n_mol*mol_size payload, server loops per-molecule
-    // and returns Σ_i E_total(fw + mol_i).  C++ subtracts n_mol*(E_fw + E_ads).
-    for(size_t comp = 1; comp < SystemComponents.NComponents.x; comp++)
-    {
-      size_t n_mol = SystemComponents.NumberOfMolecule_for_Component[comp];
-      if(n_mol == 0) continue;
-      DNN_E += SystemComponents.DNN.PredictTotal(
-          comp,
-          n_mol,
-          SystemComponents.Moleculesize[comp],
-          SystemComponents.HostSystem[comp].pos,
-          SystemComponents.ConsiderThisAdsorbateAtom,
-          SystemComponents.DNNEnergyConversion);
-    }
+    // N-body total: single QueryTotal call returns E_current - E_fw_cached.
+    // E_current is kept in sync server-side after every accepted move.
+    // Returns 0 when no adsorbate molecules are present.
+    DNN_E = SystemComponents.DNN.QueryTotal(SystemComponents.DNNEnergyConversion);
   }
+

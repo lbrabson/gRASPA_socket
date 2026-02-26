@@ -45,3 +45,22 @@ PATCH_SOCKET_MAIN_PREP
           throw std::runtime_error("Failed to connect to ML server socket");
         printf("Socket connected and framework cache primed\n");
       }
+
+PATCH_SOCKET_POST_CREATEMOL
+    if(Vars.SystemComponents[a].UseSocket)
+    {
+      // Sync full adsorbate configuration to server after CreateMolecule_InOneBox.
+      // Server uses this to prime E_current = E(fw + all_initial_ads).
+      for(size_t comp = 1; comp < Vars.SystemComponents[a].NComponents.x; comp++)
+      {
+        size_t n_mol = Vars.SystemComponents[a].NumberOfMolecule_for_Component[comp];
+        if(n_mol == 0) continue;
+        Vars.SystemComponents[a].DNN.SyncFull(
+            comp,
+            n_mol,
+            Vars.SystemComponents[a].Moleculesize[comp],
+            Vars.SystemComponents[a].HostSystem[comp].pos,
+            Vars.SystemComponents[a].ConsiderThisAdsorbateAtom);
+      }
+      printf("Socket: SyncFull complete after CreateMolecule_InOneBox\n");
+    }

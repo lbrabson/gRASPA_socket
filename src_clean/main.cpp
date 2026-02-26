@@ -347,6 +347,8 @@ Variables Initialize(void) //for pybind
     //////////////////////////////////////////////////////////
     Energy[a].running_energy = CreateMolecule_InOneBox(Vars, a, AlreadyHasFractionalMolecule);
 
+    //###PATCH_SOCKET_POST_CREATEMOL###//
+
     Check_Simulation_Energy(Vars.Box[a], Vars.SystemComponents[a].HostSystem, Vars.FF, Vars.device_FF, Vars.SystemComponents[a], CREATEMOL, a, Vars.Sims[a], true);
   }
   return Vars;

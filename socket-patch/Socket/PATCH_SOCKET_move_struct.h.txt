@@ -1,0 +1,17 @@
+PATCH_SOCKET_COMMIT_REINSERTION
+  if(SystemComponents.UseSocket)
+  {
+    // After Update_Reinsertion_data the accepted position is in d_a[comp] at UpdateLocation.
+    size_t comp       = SystemComponents.TempVal.component;
+    size_t Molsize    = SystemComponents.Moleculesize[comp];
+    size_t update_loc = Molsize * SystemComponents.TempVal.molecule;
+    int    mol_idx    = (int)SystemComponents.TempVal.molecule;
+    double3* temp_pos = (double3*) malloc(sizeof(double3) * Molsize);
+    cudaMemcpy(temp_pos, Sims.d_a[comp].pos + update_loc,
+               sizeof(double3) * Molsize, cudaMemcpyDeviceToHost);
+    Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[comp],
+                                          SystemComponents.ConsiderThisAdsorbateAtom, Molsize);
+    SystemComponents.DNN.CommitMove(comp, mol_idx);
+    free(temp_pos);
+  }
+
