@@ -5,8 +5,10 @@ void Check_DNNAtom_and_copy_pos_to_UCAtoms(double3* temp_pos, Atoms& UCAtoms, bo
   for(size_t i = 0; i < Molsize; i++)
   {
     if(ConsiderThisAdsorbateAtom[i])
+    {
       UCAtoms.pos[update_i] = temp_pos[i];
-    update_i ++;
+      update_i++;
+    }
   }
 }
 
@@ -86,18 +88,19 @@ PATCH_SOCKET_REINSERTION
 PATCH_SOCKET_FXNMAIN
   if(SystemComponents.UseSocket)
   {
-    bool Initialize = false;
-    size_t comp = 1;
-    for(size_t i = 0; i < SystemComponents.NumberOfMolecule_for_Component[comp]; i++)
+    // Send ALL adsorbate molecules in a single socket call per component.
+    // PredictTotal builds fw + n_mol*mol_size payload, server loops per-molecule
+    // and returns Σ_i E_total(fw + mol_i).  C++ subtracts n_mol*(E_fw + E_ads).
+    for(size_t comp = 1; comp < SystemComponents.NComponents.x; comp++)
     {
-      size_t update_i = 0;
-      for(size_t j = 0; j < SystemComponents.Moleculesize[comp]; j++)
-      {
-        if(!SystemComponents.ConsiderThisAdsorbateAtom[j]) continue;
-        size_t AtomIdx = i * SystemComponents.Moleculesize[comp] + j;
-        SystemComponents.DNN.UCAtoms[comp].pos[update_i] = SystemComponents.HostSystem[comp].pos[AtomIdx];
-        update_i ++;
-      }
-      DNN_E += SystemComponents.DNN.MCEnergyWrapper(comp, Initialize, SystemComponents.DNNEnergyConversion);
+      size_t n_mol = SystemComponents.NumberOfMolecule_for_Component[comp];
+      if(n_mol == 0) continue;
+      DNN_E += SystemComponents.DNN.PredictTotal(
+          comp,
+          n_mol,
+          SystemComponents.Moleculesize[comp],
+          SystemComponents.HostSystem[comp].pos,
+          SystemComponents.ConsiderThisAdsorbateAtom,
+          SystemComponents.DNNEnergyConversion);
     }
   }

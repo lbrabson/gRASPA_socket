@@ -125,6 +125,7 @@ Variables Initialize(void) //for pybind
     {
       //###PATCH_LCLIN_MAIN_READMODEL###//
       //###PATCH_ALLEGRO_MAIN_READMODEL###//
+      //###PATCH_SOCKET_MAIN_READMODEL###//
     }
   }
   printf("DONE Reading Model Info from simulation.input file\n");
@@ -192,6 +193,7 @@ Variables Initialize(void) //for pybind
       Vars.TempComponents.UseDNNforHostGuest = Comp_for_DNN_Model[a].UseDNNforHostGuest;
       Vars.TempComponents.UseAllegro         = Comp_for_DNN_Model[a].UseAllegro;
       Vars.TempComponents.UseLCLin           = Comp_for_DNN_Model[a].UseLCLin;
+      Vars.TempComponents.UseSocket          = Comp_for_DNN_Model[a].UseSocket;
       Vars.TempComponents.DNNEnergyConversion= Comp_for_DNN_Model[a].DNNEnergyConversion;
       if(Vars.TempComponents.UseDNNforHostGuest)
         if(static_cast<int>(Vars.TempComponents.UseLCLin) + static_cast<int>(Vars.TempComponents.UseAllegro)/* + static_cast<int>(Vars.TempComponents.UseDylan)*/ > 1)
@@ -281,8 +283,8 @@ Variables Initialize(void) //for pybind
     cudaMemcpy(Vars.Sims[a].Box.Cell, Vars.Box[a].Cell, 9 * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(Vars.Sims[a].Box.InverseCell, Vars.Box[a].InverseCell, 9 * sizeof(double), cudaMemcpyHostToDevice);
     Vars.Sims[a].Box.kmax = Vars.Box[a].kmax;
-    
     // Replicate block pockets across unit cells now that Box is fully initialized and populated
+    Setup_Box_Temperature_Pressure(Vars.Constants, Vars.SystemComponents[a], Vars.Box[a]);
     for(size_t comp = 0; comp < Vars.SystemComponents[a].NComponents.x; comp++)
     {
       if(comp < Vars.SystemComponents[a].UseBlockPockets.size() && Vars.SystemComponents[a].UseBlockPockets[comp])
@@ -290,7 +292,6 @@ Variables Initialize(void) //for pybind
         ReplicateBlockPockets(Vars.SystemComponents[a], comp, Vars.Sims[a].Box);
       }
     }
-
     Copy_Atom_data_to_device((size_t) NComponents.x, device_System, Vars.SystemComponents[a].HostSystem);
     Prepare_TempSystem_On_Host(Vars.SystemComponents[a].TempSystem);
     cudaMemcpy(Vars.Sims[a].d_a, device_System, sizeof(Atoms)*NComponents.x, cudaMemcpyHostToDevice);
@@ -313,64 +314,18 @@ Variables Initialize(void) //for pybind
       }
       //Declare a new, cuda managed mem (accessible on both CPU/GPU) to overwrite the original  bool mem
       cudaMallocManaged(&Vars.SystemComponents[a].ConsiderThisAdsorbateAtom, sizeof(bool) * Vars.SystemComponents[a].Moleculesize[1]);
+      Setup_Box_Temperature_Pressure(Vars.Constants, Vars.SystemComponents[a], Vars.Box[a]);
       for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
       {
         Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] = ConsiderThisAdsorbateAtom[y];
         printf("Atom %zu, Consider? %s\n", y, Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] ? "true" : "false");
       }
+      printf("UseSocket status: %d\n", Vars.SystemComponents[a].UseSocket);
+
       //Test reading Tensorflow model//
       //###PATCH_LCLIN_MAIN_PREP###//
       //###PATCH_ALLEGRO_MAIN_PREP###//
-      //###PATCH_SOCKET_MAIN_PREP_PATCHED###//
-      if(Vars.SystemComponents[a].UseSocket)
-      {
-        printf("Setting up Socket model\n");
-        //Vars.SystemComponents[a].DNN.ReadModel(Vars.SystemComponents[a].ModelName[0]);
-        printf("DONE Reading the model, model name %s\n", Vars.SystemComponents[a].ModelName[0].c_str());
-        Vars.SystemComponents[a].DNN.Match_Element_PseudoAtom_with_model(Vars.SystemComponents[a].PseudoAtoms);
-
-        Vars.SystemComponents[a].DNN.UCAtoms.resize(Vars.SystemComponents[a].NComponents.x);
-        Vars.SystemComponents[a].DNN.ReplicaAtoms.resize(Vars.SystemComponents[a].NComponents.x);
-
-        //Copy Boxsize to DNN UCBox//
-        Vars.SystemComponents[a].DNN.GenerateUCBox(Vars.Box[a].Cell, Vars.SystemComponents[a].NumberofUnitCells);
-        printf("Generated UC Box\n");
-        //Copy First unit cell of atoms to UCAtoms//                
-        //Also Initialize for Adsorbate//
-        for(size_t comp = 0; comp < Vars.SystemComponents[a].NComponents.x; comp++)
-        {
-          int3 Ncells = {1,1,1}; 
-          //If we copy adsorbates, we copy the first template atom (no need to divide number of atoms by unit cells)            
-          if(comp == 0)
-          {  
-            Ncells = Vars.SystemComponents[a].NumberofUnitCells;
-            if(!Vars.SystemComponents[a].rigid[comp] || Vars.SystemComponents[a].NComponents.y != 1)
-              throw std::runtime_error("Currently only allows rigid framework and no semi-flexible framework model!!!! If you want, write your own!!!!");          
-          }          
-          Vars.SystemComponents[a].DNN.CopyAtomsFromFirstUnitcell(Vars.SystemComponents[a].HostSystem[comp], comp, Ncells, Vars.SystemComponents[a].PseudoAtoms, Vars.SystemComponents[a].ConsiderThisAdsorbateAtom);
-        }
-        printf("DONE Copying Framework + template adsorbate atom into UCAtoms for Socket\n");
-        //As a test, replace UCatoms by preset values//
-        //Initialize the atom sizes
-        size_t comp = 1;
-        //Copy some molecule positions into UCAtoms//
-        //Use the initialization setup (position in Vars.SystemComponents[a].HostSystem[comp], already copied)//
-        printf("DONE Setting Test Adsorbate positions\n");
-
-        Vars.SystemComponents[a].DNN.NReplicacell = {3,3,3}; //Default//
-        bool Initialize = true;
-
-        double DNN_E = Vars.SystemComponents[a].DNN.MCEnergyWrapper(1, Initialize, Vars.SystemComponents[a].DNNEnergyConversion);
-        printf("%s, sum (from Unitcell values): %f\n", Initialize ? "Initialize Model": "Re-using Model", DNN_E);
-        //DO another position for the test molecules//
-        double3 d_val = {1.0, 1.0, 1.0};
-        for(size_t i = 0; i < Vars.SystemComponents[a].DNN.UCAtoms[comp].size; i++)
-          Vars.SystemComponents[a].DNN.UCAtoms[comp].pos[i] += d_val;
-
-        Initialize = false;
-        DNN_E = Vars.SystemComponents[a].DNN.MCEnergyWrapper(1, Initialize, Vars.SystemComponents[a].DNNEnergyConversion);
-        printf("%s, sum (from Unitcell values): %f\n", Initialize ? "Initialize Model": "Re-using Model", DNN_E);
-      }
+      //###PATCH_SOCKET_MAIN_PREP###//
     }
     //Prepare detailed Identity Swap statistics if there are more than 1 component//
     for(size_t i = 0; i < Vars.SystemComponents.size(); i++)

@@ -125,6 +125,7 @@ Variables Initialize(void) //for pybind
     {
       //###PATCH_LCLIN_MAIN_READMODEL###//
       //###PATCH_ALLEGRO_MAIN_READMODEL###//
+      //###PATCH_SOCKET_MAIN_READMODEL###//
     }
   }
   printf("DONE Reading Model Info from simulation.input file\n");
@@ -192,6 +193,7 @@ Variables Initialize(void) //for pybind
       Vars.TempComponents.UseDNNforHostGuest = Comp_for_DNN_Model[a].UseDNNforHostGuest;
       Vars.TempComponents.UseAllegro         = Comp_for_DNN_Model[a].UseAllegro;
       Vars.TempComponents.UseLCLin           = Comp_for_DNN_Model[a].UseLCLin;
+      Vars.TempComponents.UseSocket          = Comp_for_DNN_Model[a].UseSocket;
       Vars.TempComponents.DNNEnergyConversion= Comp_for_DNN_Model[a].DNNEnergyConversion;
       if(Vars.TempComponents.UseDNNforHostGuest)
         if(static_cast<int>(Vars.TempComponents.UseLCLin) + static_cast<int>(Vars.TempComponents.UseAllegro)/* + static_cast<int>(Vars.TempComponents.UseDylan)*/ > 1)
@@ -281,7 +283,6 @@ Variables Initialize(void) //for pybind
     cudaMemcpy(Vars.Sims[a].Box.Cell, Vars.Box[a].Cell, 9 * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(Vars.Sims[a].Box.InverseCell, Vars.Box[a].InverseCell, 9 * sizeof(double), cudaMemcpyHostToDevice);
     Vars.Sims[a].Box.kmax = Vars.Box[a].kmax;
-    
     // Replicate block pockets across unit cells now that Box is fully initialized and populated
     for(size_t comp = 0; comp < Vars.SystemComponents[a].NComponents.x; comp++)
     {
@@ -290,7 +291,6 @@ Variables Initialize(void) //for pybind
         ReplicateBlockPockets(Vars.SystemComponents[a], comp, Vars.Sims[a].Box);
       }
     }
-
     Copy_Atom_data_to_device((size_t) NComponents.x, device_System, Vars.SystemComponents[a].HostSystem);
     Prepare_TempSystem_On_Host(Vars.SystemComponents[a].TempSystem);
     cudaMemcpy(Vars.Sims[a].d_a, device_System, sizeof(Atoms)*NComponents.x, cudaMemcpyHostToDevice);
@@ -307,9 +307,17 @@ Variables Initialize(void) //for pybind
       //Zhao's note: Hard-coded component here//
       //Assuming component `1` is just the 1st adsorbate species//
       std::vector<bool>ConsiderThisAdsorbateAtom(Vars.SystemComponents[a].Moleculesize[1], false);
-      for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
+      if(Vars.SystemComponents[a].ConsiderThisAdsorbateAtom != nullptr)
       {
-        ConsiderThisAdsorbateAtom[y] = Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y];
+        // DNNPseudoAtoms was specified — copy the existing CPU-malloc'd flags
+        for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
+          ConsiderThisAdsorbateAtom[y] = Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y];
+      }
+      else
+      {
+        // No DNNPseudoAtoms keyword — default: pass all adsorbate atoms to the model
+        for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
+          ConsiderThisAdsorbateAtom[y] = true;
       }
       //Declare a new, cuda managed mem (accessible on both CPU/GPU) to overwrite the original  bool mem
       cudaMallocManaged(&Vars.SystemComponents[a].ConsiderThisAdsorbateAtom, sizeof(bool) * Vars.SystemComponents[a].Moleculesize[1]);
@@ -318,6 +326,7 @@ Variables Initialize(void) //for pybind
         Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] = ConsiderThisAdsorbateAtom[y];
         printf("Atom %zu, Consider? %s\n", y, Vars.SystemComponents[a].ConsiderThisAdsorbateAtom[y] ? "true" : "false");
       }
+
       //Test reading Tensorflow model//
       //###PATCH_LCLIN_MAIN_PREP###//
       //###PATCH_ALLEGRO_MAIN_PREP###//

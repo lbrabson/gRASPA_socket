@@ -1129,7 +1129,7 @@ struct Components
   std::vector<std::string>ModelName;                  // Name (folder) of the stored model
   std::vector<std::string>InputLayer;                 // Name of the input layer, run cli to get it
   size_t* device_InverseIndexList;                    // device_pointer for knowing which pair of interaction is stored in where
-  bool*   ConsiderThisAdsorbateAtom;                  // device pointer
+  bool*   ConsiderThisAdsorbateAtom = nullptr;         // device pointer
   double* device_Distances;                           // device_pointer for storing pair-wise distances//
  
   std::vector<std::vector<double>> EnergyTimesNumberOfMolecule; // Book-keeping Energy times the number of molecules for heat of adsorption

@@ -3133,6 +3133,7 @@ void ReadDNNModelSetup(Components& SystemComponents)
 
 //###PATCH_LCLIN_READDATA###//
 //###PATCH_ALLEGRO_READDATA###//
+//###PATCH_SOCKET_READDATA###//
 
 // Read block pockets from file
 // Note: Box is not available at this point, so we read coordinates as-is
