@@ -7,7 +7,9 @@ PATCH_SOCKET_COMMIT_REINSERTION
     size_t update_loc = Molsize * SystemComponents.TempVal.molecule;
     int    mol_idx    = (int)SystemComponents.TempVal.molecule;
     double3* temp_pos = (double3*) malloc(sizeof(double3) * Molsize);
-    cudaMemcpy(temp_pos, Sims.d_a[comp].pos + update_loc,
+    Atoms host_atoms_tmp;
+    cudaMemcpy(&host_atoms_tmp, Sims.d_a + comp, sizeof(Atoms), cudaMemcpyDeviceToHost);
+    cudaMemcpy(temp_pos, host_atoms_tmp.pos + update_loc,
                sizeof(double3) * Molsize, cudaMemcpyDeviceToHost);
     Check_DNNAtom_and_copy_pos_to_UCAtoms(temp_pos, SystemComponents.DNN.UCAtoms[comp],
                                           SystemComponents.ConsiderThisAdsorbateAtom, Molsize);

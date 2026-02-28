@@ -33,12 +33,12 @@ PATCH_SOCKET_MAIN_PREP
           Vars.SystemComponents[a].DNN.CopyAtomsFromFirstUnitcell(Vars.SystemComponents[a].HostSystem[comp], comp, Ncells, Vars.SystemComponents[a].PseudoAtoms, Vars.SystemComponents[a].ConsiderThisAdsorbateAtom);
         }
         printf("DONE Copying Framework + template adsorbate atom into UCAtoms for Socket\n");
-        size_t comp = 1;
         printf("DONE Setting Test Adsorbate positions\n");
 
-        // Wrap framework and template adsorbate into UCBox before connecting
+        // Wrap framework and all adsorbate templates into UCBox before connecting
         Vars.SystemComponents[a].DNN.WrapSuperCellAtomIntoUCBox(0);    // framework
-        Vars.SystemComponents[a].DNN.WrapSuperCellAtomIntoUCBox(comp); // adsorbate template
+        for(size_t comp = 1; comp < Vars.SystemComponents[a].NComponents.x; comp++)
+          Vars.SystemComponents[a].DNN.WrapSuperCellAtomIntoUCBox(comp); // adsorbate templates
 
         // Connect: handshake + species map + framework cache priming
         if(Vars.SystemComponents[a].DNN.connect_socket() < 0)

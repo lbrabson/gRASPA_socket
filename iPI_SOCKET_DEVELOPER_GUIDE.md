@@ -253,6 +253,14 @@ struct Socket {
     size_t DNN_Molsize = 0;                     // Atoms per adsorbate (excluding fictional)
     size_t nstep = 0;
     bool handshake_done = false;
+
+    // Per-call-type timing (seconds) and counters
+    double t_query_delta   = 0.0;  size_t n_query_delta   = 0;
+    double t_commit_insert = 0.0;  size_t n_commit_insert = 0;
+    double t_commit_move   = 0.0;  size_t n_commit_move   = 0;
+    double t_commit_delete = 0.0;  size_t n_commit_delete = 0;
+    double t_query_total   = 0.0;  size_t n_query_total   = 0;
+    double t_sync_full     = 0.0;  size_t n_sync_full     = 0;
 };
 ```
 
@@ -276,7 +284,8 @@ struct Socket {
 | `PredictFromSocketExtended(xyz, types, n, config_type, n_mol, mol_idx)` | Send coords via extended format, get energy back (eV) |
 | `PrimeFrameworkCache()` | Send framework-only config (`config_type=0`); server computes and caches E_fw, initializes E_current = E_fw |
 | `send_species_map()` | Send element symbols over the wire immediately after handshake |
-| `close_socket()` | Send EXIT command, close fd (call explicitly if needed; no destructor) |
+| `close_socket()` | Signal EOF via `shutdown(fd, SHUT_WR)`, then `close(fd)`. Avoids ECONNRESET race that occurred when `send_command("EXIT")` + immediate `close()` let the kernel send RST before the server read the bytes. |
+| `PrintTimingSummary(FILE* out)` | Print per-call-type timing table (total time, call count, ms/call) to `out`. Called from `EndOfSimulationWrapUp()` when `UseSocket = true`. |
 | `Match_Element_PseudoAtom_with_model(PA)` | Map pseudo-atoms to element symbols |
 | `CopyAtomsFromFirstUnitcell(...)` | Extract UC atoms, filter fictional sites |
 | `WrapSuperCellAtomIntoUCBox(comp)` | PBC wrapping via fractional coords |
@@ -492,15 +501,13 @@ prime `ads_config` and bring `E_current` up to `E(fw + initial_ads)`.
 
 | Move type | DELTA_QUERY calls | COMMIT calls (on accept) | Total (accept / reject) |
 |-----------|-------------------|--------------------------|-------------------------|
-| Translation/Rotation | 1 | 1 (COMMIT_MOVE) | 2 / 1 |
-| Insertion (CBMC/single) | 1 | 1 (COMMIT_INSERT) | 2 / 1 |
-| Deletion (CBMC/single) | 1 | 1 (COMMIT_DELETE) | 2 / 1 |
-| Reinsertion | 1 | 1 (COMMIT_MOVE) | 2 / 1 |
+| Translation/Rotation | 1 | 0 (reuses pending) | 1 / 1 |
+| Insertion (CBMC/single) | 1 | 0 (reuses pending) | 1 / 1 |
+| Deletion (CBMC/single) | 1 | 0 (reuses pending) | 1 / 1 |
+| Reinsertion | 1 | 0 (reuses pending) | 1 / 1 |
 | Total energy (FxnMain) | 1 (QUERY_TOTAL) | — | 1 |
 
-Each DELTA_QUERY triggers one MACE forward pass on the server (trial_config). Each
-COMMIT triggers one MACE forward pass to recompute `E_current`. The framework cache
-is always reused.
+Each DELTA_QUERY triggers two MACE forward passes on the server: one for the full system (`E_full`) and one for the adsorbates alone (`E_ads`). This is necessary to isolate the HG interaction energy (see Section 17.3). On acceptance, the COMMIT message reuses the energies already computed during the DELTA_QUERY, so no additional forward passes are required.
 
 ### Mol-index ordering invariant
 
@@ -546,14 +553,19 @@ first socket call. Previously this wrap happened implicitly inside
 **File:** `ase_ipi_server_mace.py`
 
 ```bash
-python ase_ipi_server_mace.py --socket ase_ipi_socket --model /path/to/model.pt
+python ase_ipi_server_mace.py \
+    --socket ase_ipi_socket \
+    --model /path/to/model.pt \
+    --profile-output ./runs/profiles/server_profile.json
 ```
 
 - Loads a MACE ML potential (or other ASE-compatible calculator)
 - Implements the iPI wire protocol directly (not via ASE's SocketIOCalculator)
-- Routes configurations by `natoms` to assign correct element symbols
+- Routes configurations by `config_type` (unambiguous; see Section 4)
 - Supports CUDA GPU or CPU (`--device`)
 - Socket path becomes `/tmp/ase_ipi_socket` (matching the C++ client default)
+- `--profile-output`: path for per-phase JSON timing profile written at end of session
+  (default: `./runs/profiles/server_profile.json`)
 
 ### Server Startup Sequence
 
@@ -586,15 +598,15 @@ startup sequence (gRASPA calls `SyncFull` before the MC loop begins).
 | Function | Purpose |
 |----------|---------|
 | `do_handshake(conn, cell)` | Perform iPI handshake (STATUS/NEEDINIT/INIT) |
-| `recv_species_map(conn)` | Receive element symbols; build `config_map` |
-| `recv_prime_framework(conn, calc, config_map)` | Handle config_type=0; compute and cache E_fw; set E_current = E_fw |
-| `serve(conn, calc, config_map, cell)` | Main protocol loop; dispatch by config_type; manage ads_config and E_current |
-| `handle_delta_query(comp, mol_idx, trial_xyz)` | Compute E(trial_config) − E_current; return ΔE |
-| `handle_commit_insert(comp, xyz)` | Append mol to ads_config[comp]; recompute E_current |
-| `handle_commit_delete(comp, mol_idx)` | Swap-with-last remove from ads_config[comp]; recompute E_current |
-| `handle_commit_move(comp, mol_idx, xyz)` | Update ads_config[comp][mol_idx]; recompute E_current |
-| `handle_sync_full(comp, n_mol, xyz)` | Replace ads_config[comp] entirely; recompute E_current |
-| `handle_query_total()` | Return E_current − E_fw_cached |
+| `recv_species_map(conn)` | Receive element symbols over wire; return `(species_map, n_fw)` |
+| `serve(conn, calc, species_map, n_fw, profile_output)` | Main protocol loop; dispatch by `config_type`; manage `comp_molecules`, `E_current`, `E_ads_current`. Prints timing summary and writes JSON at end of session. |
+| `_build_atoms(fw_syms, fw_pos, comp_molecules, comp_mol_syms, cell)` | Combine framework + all stored adsorbates into one ASE `Atoms` object. Raises `ValueError` with component index and shape details if `mol_pos.shape[0] != len(mol_syms)` for any molecule. |
+| `_ads_energy(comp_molecules, comp_mol_syms, cell, calc)` | Energy of all adsorbates without the framework (for HG decomposition) |
+| `_print_timing_summary(t)` | Print per-phase, per-message-type timing table to stdout |
+
+All routing (DELTA_QUERY, COMMIT_*, SYNC_FULL, QUERY_TOTAL) is handled inline in
+`serve()` via `if/elif` branches on `config_type`. There are no separate
+`handle_*` functions.
 
 ### Typical Launch Script (`gcmc_mace.bash`)
 
@@ -659,7 +671,8 @@ gRASPA side:
                 → config_type=200+comp with mol_idx and trial positions
                 → server returns ΔE = E(trial_config) − E_current
               DNN_Replace_Energy(): store classical HG terms, zero them, set DNN_E = ΔE
-              Check_DNN_Drift(): if |DNN_E - classical_HG_sum| > MaxDNNDrift → reject
+              Check_DNN_Drift(): SKIPPED when UseSocket=true (see §15 Recently Fixed);
+                for Allegro: if |DNN_E - classical_HG_sum| > MaxDNNDrift → reject
          g. Metropolis acceptance/rejection
          h. If ACCEPTED:
               Update GPU arrays (Update_deletion_data_Parallel, etc.)
@@ -685,7 +698,8 @@ gRASPA side:
 | Wrong header received | Prints unexpected header to stderr |
 | DNN drift exceeds threshold | Move rejected, event logged to `DNN/Outliers_*.data` |
 | Missing config parameters | Throws `std::runtime_error` with descriptive message |
-| Normal shutdown | OS reclaims fd on process exit; call `close_socket()` explicitly for a clean EXIT to the server |
+| Client disconnects abruptly (ECONNRESET) | `try/except (ConnectionError, BrokenPipeError, OSError)` around STATUS/READY recv at top of `serve()` loop catches the error, breaks cleanly, and lets the post-loop timing summary and JSON write always execute |
+| Normal C++ shutdown | `close_socket()` calls `shutdown(fd, SHUT_WR)` then `close(fd)`, sending a clean FIN so the server sees EOF rather than RST |
 
 **Design philosophy:** Fail loudly on communication errors rather than silently producing wrong energies.
 
@@ -693,27 +707,14 @@ gRASPA side:
 
 ## 14. Known Limitations
 
-1. **Two socket calls per energy evaluation** (E_total + E_adsorbate) after framework cache is warm — the first `Predict()` still requires 3 calls (adds E_framework)
+1. **Two MACE forward passes per DELTA_QUERY** — the server evaluates E(fw + trial_ads) and E(trial_ads alone) separately to subtract direct adsorbate–adsorbate energy. The COMMIT that follows an accepted move triggers a third pass to recompute E_current. Caching `E_ads_current` and updating it incrementally (rather than recomputing from scratch) could halve this cost for COMMIT operations.
 2. **Synchronous/blocking I/O** — no pipelining or async evaluation
 3. **Socket path hardcoded** — changing requires source modification and recompilation
 4. **Single socket connection** — one ML server per simulation
 5. **Rigid framework only** — `main.cpp` throws if framework is not rigid or has multiple components
-6. **`natoms`-based config identification** — the server routes each call by `natoms` via `symbol_map`; if two config types happen to have the same atom count (e.g., `n_fw == n_ads`), the routing is ambiguous
+6. ~~`natoms`-based config identification~~ — **no longer applicable**. The current server routes exclusively by `config_type` (an explicit int32 tag sent before the cell matrix); atom count is never used for routing. The old 1-body server used `natoms` for routing, which was ambiguous when framework and adsorbate atom counts coincided, but that code has been replaced entirely.
 7. **Forces/virial unused** — read from server for protocol compliance but discarded
 8. **Server reconnection** — the server accepts new connections after a client disconnects, but the C++ client has no reconnect logic (if the server dies mid-simulation, gRASPA terminates)
-
-### Species File Format (current)
-
-```
-FRAMEWORK <n_fw>
-<fw_symbols...>
-ADSORBATE <n_ads_comp1>
-<ads_comp1_symbols...>
-ADSORBATE <n_ads_comp2>      # one block per adsorbate component (mixture support)
-<ads_comp2_symbols...>
-```
-
-The server builds `symbol_map` entries for each adsorbate block: `n_ads_i`, `n_fw + n_ads_i`, and `n_fw`.
 
 ---
 
@@ -724,6 +725,19 @@ The following issues were identified in code review. Items marked [FIXED] have b
 ### Recently Fixed
 
 These P0 correctness bugs have been resolved in the current patched source (`patch_Socket/`):
+
+- **[FIXED] `DNNDrift` rejection blocking all N-body socket moves.** The DNNDrift check
+  compares `correction = DNN_E − classical_HG`. For the N-body Socket scheme `DNN_E` is
+  the full many-body ΔE_HG over all N adsorbates, while `classical_HG` is the 1-body
+  classical energy for a single molecule — a physically large quantity, not a model-error
+  signal. Any finite `MaxDNNDrift` threshold caused every insertion, deletion,
+  translation, rotation, and single-swap to be rejected, freezing loading at the initial
+  `CreateMolecule_InOneBox` count. Fixed by guarding all three check sites with
+  `!SystemComponents.UseSocket`:
+  `src_clean/mc_swap_utilities.h` `Insertion_Body` and `Deletion_Body`;
+  `src_clean/DNN_HostGuest_Energy_Functions.h` `Check_DNN_Drift`.
+  The `MaxDNNDrift` parameter continues to function as intended for the Allegro (1-body)
+  path.
 
 - **[FIXED] `DNN_Molsize` accumulated across adsorbate components.** `CopyAtomsFromFirstUnitcell()` was adding to `DNN_Molsize` rather than assigning it, so simulating multiple adsorbate components would silently corrupt the stored molecule size. (`src_clean/ase_energy_client.h`, ~line 607.)
 - **[FIXED] `PATCH_SOCKET_FXNMAIN` hardcoded component index.** The total-energy loop called `MCEnergyWrapper` with a literal `comp=1` rather than the loop variable, so only the first adsorbate component was ever evaluated in `Check_Simulation_Energy()`. (`socket-patch/Socket/PATCH_SOCKET_FXNMAIN block`.)
@@ -790,8 +804,8 @@ Each of the INSERTION, DELETION, SINGLE, and REINSERTION patch blocks allocates 
 ### Correctness and Flexibility
 
 **C1. `ConsiderThisAdsorbateAtom` is a single shared array applied to all adsorbate components.**
-`CopyAtomsFromFirstUnitcell()` and all patch blocks use a single `ConsiderThisAdsorbateAtom` boolean array (length = `Moleculesize` of whichever component was set up first). If a second adsorbate component has a different molecule size, the same array is applied to it, risking out-of-bounds reads or incorrect atom filtering. Each adsorbate component should have its own filter array.
-- File: `src_clean/ase_energy_client.h`, line 594 (`CopyAtomsFromFirstUnitcell` signature); `socket-patch/Socket/PATCH_SOCKET_DNN_HostGuest_Energy_Functions.h.txt`, all patch blocks.
+`CopyAtomsFromFirstUnitcell()` and all patch blocks use a single `ConsiderThisAdsorbateAtom` boolean array. In `read_data.cpp`, this pointer is overwritten (and the previous allocation leaked) every time a new `DNNPseudoAtoms` line is parsed. Furthermore, it is allocated based on the `Moleculesize` of the first guest component; if a subsequent component is larger, the parsing loop will trigger an out-of-bounds memory write. Each adsorbate component should have its own independently allocated filter array.
+- File: `src_clean/read_data.cpp`, line 2314; `src_clean/ase_energy_client.h`, line 594.
 
 **C2. `WrapSuperCellAtomIntoUCBox()` computes bond distances into a vector that is never used.**
 The function populates the local `Bonds` vector with inter-atom distances (lines 741–745) but `Bonds` is never read, returned, or checked. The bond-distance code is dead. It should either be completed (the comment suggests it was intended to detect molecules split across the periodic boundary) or removed to avoid confusion.
@@ -819,6 +833,50 @@ The `cache_valid` flag in `Socket` is set to `true` after the first `E_framework
 ## 16. Changelog
 
 All changes are listed in reverse chronological order (most recent first). Items marked **[PENDING]** are included in this release but may require further testing or validation.
+
+---
+
+### Fix: DNNDrift rejection blocking all N-body socket moves
+
+**Date:** 2026-02-27
+**Files:** `src_clean/mc_swap_utilities.h`, `src_clean/DNN_HostGuest_Energy_Functions.h`,
+`ase_ipi_server_mace.py`
+
+- **`mc_swap_utilities.h`** — `Insertion_Body` (line 119) and `Deletion_Body` (line 212):
+  added `!SystemComponents.UseSocket &&` guard around the `fabs(correction) > DNNDrift`
+  rejection block. For the Socket N-body scheme the "correction" is a many-body vs 1-body
+  energy difference, not a model quality signal, so the check is meaningless and caused
+  every swap move to be rejected.
+- **`DNN_HostGuest_Energy_Functions.h`** — `Check_DNN_Drift` (line 307): same guard for
+  translation, rotation, and single-swap moves.
+- **`ase_ipi_server_mace.py`** — `_build_atoms`: added a per-component shape-consistency
+  assertion (`mol_pos.shape[0] != len(mol_syms)`) to produce an actionable error message
+  if mol position arrays and symbol lists ever diverge. `fw_symbols` now stored as an
+  explicit `list(symbols)` copy rather than an alias to guard against future aliasing bugs.
+
+---
+
+### Timing profile, graceful shutdown, and incremental build
+
+**Date:** 2026-02-26
+**Files:** `src_clean/ase_energy_client.h`, `src_clean/main.cpp`, `src_clean/Makefile` *(new)*,
+`ase_ipi_server_mace.py`
+
+Three operational improvements:
+
+1. **Timing profile** — per-call-type socket timing accumulated on both sides; printed
+   at end of run via `PrintTimingSummary()` (C++) and `_print_timing_summary()` (Python).
+   Python server also writes a JSON profile to `--profile-output`. See Section 9 for
+   call-count breakdown per move type.
+
+2. **Graceful shutdown** — `close_socket()` now uses `shutdown(fd, SHUT_WR)` instead of
+   `send_command("EXIT"); close(fd)`, eliminating the RST race that caused ECONNRESET.
+   The server's `serve()` loop wraps the STATUS recv in `try/except` so the timing
+   summary always prints even on abrupt disconnect.
+
+3. **Incremental Makefile** — `src_clean/Makefile` (copied to `patch_Socket/` by
+   `patch.py`) replaces `NVC_COMPILE` for everyday builds. Uses `-MMD -MP` for header
+   dependency tracking; retains `.o` files. Use `make` instead of `bash NVC_COMPILE`.
 
 ---
 
@@ -1217,14 +1275,15 @@ ASE calculators expose energy via `get_potential_energy()`, which returns a **si
 ```
 C++ calls QueryDelta(comp, mol_idx, trial_xyz)
   → send_positions_extended(config_type=200+comp, mol_idx, trial_xyz, ...)
-  → server computes E(trial_config) = MACE.get_potential_energy(fw + all_ads + trial_mol)
-  → server returns ΔE = E(trial_config) − E_current
+  → server computes E_full = MACE(fw + all_ads + trial_mol)
+  → server computes E_ads  = MACE(all_ads + trial_mol)
+  → server returns ΔE = (E_full - E_ads) - (E_current - E_ads_current)
 ```
 
 **On acceptance:**
 ```
 C++ calls CommitXxx(comp, mol_idx)
-  → server updates ads_config[comp], recomputes E_current (1 MACE call)
+  → server updates ads_config[comp] and sets E_current/E_ads_current to the pending trial energies (0 MACE calls)
 ```
 
 The `config_type` int32 tag routes each call server-side:
@@ -1241,7 +1300,7 @@ The `config_type` int32 tag routes each call server-side:
 | `303` | Sync full (resync entire component) | yes (= comp) |
 | `500` | Query total energy | — |
 
-This design requires **2 MACE forward passes per accepted MC move** (1 for the delta query + 1 for the commit to recompute E_current) and **1 MACE pass per rejected move** (delta query only). The old 1-body scheme required 2 MACE passes per delta-energy move type regardless of acceptance.
+This design requires **1 DELTA_QUERY call per MC move** (which triggers 2 MACE forward passes: one for the full system and one for the adsorbates alone). The `COMMIT` operation reuses these results and is essentially free.
 
 ### 18.3 Comparison
 

@@ -116,9 +116,9 @@ inline MoveEnergy Insertion_Body(Variables& Vars, size_t systemId, CBMC_Variable
 
     energy.DNN_Replace_Energy();
     double correction = energy.DNN_Correction();
-    if(fabs(correction) > SystemComponents.DNNDrift) //If there is a huge drift in the energy correction between DNN and Classical HostGuest//
+    if(!SystemComponents.UseSocket && fabs(correction) > SystemComponents.DNNDrift) //If there is a huge drift in the energy correction between DNN and Classical HostGuest//
     {
-      //printf("INSERTION: Bad Prediction, reject the move!!!\n"); 
+      //printf("INSERTION: Bad Prediction, reject the move!!!\n");
       SystemComponents.InsertionDNNReject ++;
       CBMC.SuccessConstruction = false;
       WriteOutliers(SystemComponents, Sims, DNN_INSERTION, energy, correction);
@@ -209,9 +209,9 @@ inline MoveEnergy Deletion_Body(Variables& Vars, size_t systemId, CBMC_Variables
 
     energy.DNN_Replace_Energy();
     double correction = energy.DNN_Correction();
-    if(fabs(correction) > SystemComponents.DNNDrift) //If there is a huge drift in the energy correction between DNN and Classical HostGuest//
+    if(!SystemComponents.UseSocket && fabs(correction) > SystemComponents.DNNDrift) //If there is a huge drift in the energy correction between DNN and Classical HostGuest//
     {
-      //printf("DELETION: Bad Prediction, reject the move!!!\n"); 
+      //printf("DELETION: Bad Prediction, reject the move!!!\n");
       SystemComponents.DeletionDNNReject ++;
       CBMC.SuccessConstruction = false;
       WriteOutliers(SystemComponents, Sims, DNN_DELETION, energy, correction);

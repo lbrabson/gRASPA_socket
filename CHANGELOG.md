@@ -1,5 +1,124 @@
 # Changelog
 
+## 2026-02-27 — Fix: DNNDrift rejection blocking all N-body socket moves
+
+**Summary:** Guarded the DNNDrift rejection check with `!SystemComponents.UseSocket`
+in three locations. The check compares DNN_E (full N-body ΔE_HG over all adsorbates)
+against classical_HG (1-molecule 1-body energy), which is physically a large quantity
+for any non-zero loading — not a sign of model instability. The false comparison
+caused every GCMC insertion, deletion, translation, rotation, and single-swap attempt
+to be rejected immediately, freezing loading at the `CreateMolecule_InOneBox` count.
+
+**Files changed:**
+- `src_clean/mc_swap_utilities.h` — `Insertion_Body`: line 119, `Deletion_Body`: line 212
+- `src_clean/DNN_HostGuest_Energy_Functions.h` — `Check_DNN_Drift`: line 307
+- `ase_ipi_server_mace.py` — `_build_atoms`: added shape-consistency assertion for
+  per-component mol_pos vs mol_syms to give a clearer error message on mismatch;
+  `fw_symbols` now stored as an explicit list copy instead of an alias.
+
+---
+
+## 2026-02-27 — Fix: constant low loading via N-body stateful consistency
+
+**Summary:** Resolved the "constant low loading" bug by restoring strict coordinate consistency between the gRASPA client and the MACE server. The server now caches trial configurations during queries, eliminating the risk of coordinate-wrapping mismatches or data-transfer desync during commits.
+
+### 1. Server-side Trial Caching
+- **Implementation:** Introduced a `pending_mol` variable in the `serve()` loop of `ase_ipi_server_mace.py`.
+- **Logic:** During a `DELTA_QUERY`, the server stores the trial molecule's coordinates. On a subsequent `COMMIT_INSERT` or `COMMIT_MOVE`, it applies this cached configuration to the primary state (`comp_molecules`) instead of reading new positions from the socket.
+- **Benefit:** Guarantees that the configuration accepted by gRASPA is *exactly* the same one evaluated by the ML potential, preventing loading stagnation caused by floating-point drift or wrapping discrepancies.
+
+### 2. Protocol Simplification & Efficiency
+- **Client Changes:** Simplified `CommitInsert` and `CommitMove` in `src_clean/ase_energy_client.h` and the corresponding socket patches to send null payloads (0 atoms).
+- **Reduced Overhead:** Eliminated redundant `cudaMemcpy` operations and coordinate-wrapping logic on the client for every accepted move.
+- **Improved Reliability:** Reduces the total number of MACE forward passes per accepted move from 2 to 0 (the query evaluation results are reused), making commits essentially free.
+
+---
+
+## 2026-02-26 — Timing profile, graceful shutdown, and incremental build
+
+**Summary:** Three operational improvements for production runs and development
+iteration: end-to-run performance timing, a race-free socket shutdown that ensures
+timing summaries are always printed, and an incremental `Makefile` that replaces the
+monolithic `NVC_COMPILE` rebuild script.
+
+### 1. End-to-run timing profile
+
+Per-call-type socket timing is now accumulated on both sides and printed as a formatted
+summary at the end of each run.
+
+**C++ client** (`src_clean/ase_energy_client.h`):
+- Added `#include <omp.h>`.
+- Added six timing field pairs to `struct Socket`:
+  `t_query_delta/n_query_delta`, `t_commit_insert/n_commit_insert`,
+  `t_commit_move/n_commit_move`, `t_commit_delete/n_commit_delete`,
+  `t_query_total/n_query_total`, `t_sync_full/n_sync_full`.
+- Each public method (`QueryDelta`, `CommitInsert`, `CommitDelete`, `CommitMove`,
+  `SyncFull`, `QueryTotal`) wraps its `PredictFromSocketExtended` call with
+  `omp_get_wtime()` bookends that accumulate into the appropriate pair.
+- New `PrintTimingSummary(FILE* out) const` method prints a table with total time,
+  call count, and ms/call for each category, plus a grand total.
+- Called from `EndOfSimulationWrapUp()` in `src_clean/main.cpp` behind a
+  `if(UseSocket)` guard.
+
+**Python server** (`ase_ipi_server_mace.py`):
+- Added `import time` and `import json`.
+- Five timing phases tracked per message: `t_recv`, `t_build`, `t_mace_full`,
+  `t_mace_ads`, `t_send` — accumulated into a `_timing` dict keyed by message type
+  (`FRAMEWORK`, `DELTA_QUERY`, `COMMIT_INSERT`, `COMMIT_DELETE`, `COMMIT_MOVE`,
+  `SYNC_FULL`, `QUERY_TOTAL`).
+- New `_print_timing_summary()` helper prints the table at end of session.
+- JSON profile written to the path given by `--profile-output`
+  (default: `./runs/profiles/server_profile.json`).
+- New `runs/profiles/` directory created for profile files.
+
+### 2. Graceful socket shutdown
+
+**Root cause:** `close_socket()` called `send_command("EXIT")` then immediately
+`close(fd)`. The kernel could send a TCP RST before the server read the EXIT bytes,
+causing `ConnectionError` (ECONNRESET) on the Python side. Because the exception
+propagated out of `serve()` to the outer `try/except` in `main()`, the post-loop
+timing summary code was never reached.
+
+**Fixes (two-part):**
+
+1. **`src_clean/ase_energy_client.h`** — `close_socket()` now calls
+   `shutdown(fd, SHUT_WR)` instead of `send_command("EXIT")`. `shutdown` flushes
+   buffered bytes and sends a clean FIN; no RST race is possible.
+
+2. **`ase_ipi_server_mace.py`** — The `send_header(STATUS)` / `recv_header()` block
+   at the top of the `while True` loop is now wrapped in
+   `try/except (ConnectionError, BrokenPipeError, OSError)` that `break`s cleanly out
+   of the loop. The post-loop timing summary therefore always executes.
+
+### 3. Incremental build Makefile
+
+**Problem:** `NVC_COMPILE` compiled all five translation units unconditionally and
+ended with `rm *.o`, preventing any object-file reuse between builds. A single header
+change triggered a full ~5-minute recompile.
+
+**Solution:** New `src_clean/Makefile` (copied to `patch_Socket/Makefile` by
+`patch.py`) uses the same `nvc++` flags as `NVC_COMPILE` and adds `-MMD -MP` for
+automatic header dependency tracking. Object files are retained between builds; `make`
+recompiles only changed translation units.
+
+```bash
+cd patch_Socket/
+make            # incremental build
+make clean      # remove binary + .o + .d files
+make cleanobj   # remove .o + .d only (keep binary)
+```
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `src_clean/ase_energy_client.h` | Added timing fields, `PrintTimingSummary()`, fixed `close_socket()` |
+| `src_clean/main.cpp` | Call `PrintTimingSummary()` in `EndOfSimulationWrapUp()` |
+| `src_clean/Makefile` | New file — incremental build with `-MMD -MP` |
+| `ase_ipi_server_mace.py` | Timing infrastructure, `--profile-output` flag, graceful disconnect |
+
+---
+
 ## 2026-02-25 — N-body socket HG energy scheme
 
 **Summary:** The socket path's host-guest energy evaluation has been upgraded from a

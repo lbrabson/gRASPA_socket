@@ -443,8 +443,10 @@ void EndOfSimulationWrapUp(Variables& Vars)
     fprintf(Vars.SystemComponents[i].OUTPUT, "DNN Feature Preparation Time: %.5f, DNN Prediction Time: %.5f\n", Vars.SystemComponents[0].DNNFeatureTime, Vars.SystemComponents[0].DNNPredictTime);
     fprintf(Vars.SystemComponents[i].OUTPUT, "DNN GPU Time: %.5f, ", Vars.SystemComponents[i].DNNGPUTime);
     fprintf(Vars.SystemComponents[i].OUTPUT, "DNN Sort Time: %.5f, ", Vars.SystemComponents[0].DNNSortTime);
-    fprintf(Vars.SystemComponents[i].OUTPUT, "std::sort Time: %.5f, ", Vars.SystemComponents[0].DNNstdsortTime); 
+    fprintf(Vars.SystemComponents[i].OUTPUT, "std::sort Time: %.5f, ", Vars.SystemComponents[0].DNNstdsortTime);
     fprintf(Vars.SystemComponents[i].OUTPUT, "Featurization Time: %.5f\n", Vars.SystemComponents[0].DNNFeaturizationTime);
+    if(Vars.SystemComponents[i].UseSocket)
+      Vars.SystemComponents[i].DNN.PrintTimingSummary(Vars.SystemComponents[i].OUTPUT);
   } 
   /////////////////////////////////////////////////////////
   // Check if the Ewald Diff and running Diff make sense //

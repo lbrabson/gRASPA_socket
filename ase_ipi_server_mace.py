@@ -1,45 +1,39 @@
 #!/usr/bin/env python3
 """
-Custom iPI-protocol server for gRASPA Monte Carlo.
+gRASPA iPI-protocol server — N-body (many-body) socket scheme.
 
-Receives a species map from gRASPA at connection time (replaces the old
-static species file).  Each POSDATA message now carries per-atom type
-indices and an n_mol field so the server can handle batched FXNMAIN calls
-(all adsorbate molecules in one call) as well as single-molecule MC moves.
+Wire protocol (C++ → Python):
+  After handshake, gRASPA sends SPECIESMAP then enters the STATUS loop.
 
-Wire protocol additions (C++ → Python):
-  After handshake, before the STATUS loop:
-    "SPECIESMAP" header (12-byte padded)
-    int32  n_species
-    int32  n_fw            atom count in ReplicaAtoms[0]
-    for each species:
-      int32 index
-      int32 len
-      len bytes symbol
+  Old format (config_type < 200):
+    config_type → cell[9] → inv_cell[9] → n_mol → natoms → types → xyz
+    Used only by PrimeFrameworkCache (config_type=0).
 
-  Each POSDATA payload now contains:
-    int32   config_type    routing tag (0=fw, N=ads-only, 100+N=combined)
-    9×f64   cell
-    9×f64   inv_cell       (ignored, server uses PBC via cell)
-    int32   n_mol          adsorbate molecule count
-    int32   natoms
-    N×int32 types          species index per atom
-    3N×f64  xyz
+  New format (config_type >= 200):
+    config_type → mol_idx → cell[9] → inv_cell[9] → n_mol → natoms → types → xyz
 
-  For config_type=100+N with n_mol>1 (FXNMAIN batch):
-    Server loops per molecule, returns Σ_i E_total(fw + mol_i).
+  Config type routing:
+    0         FRAMEWORK_PRIME  : cache E_fw
+    200+comp  DELTA_QUERY      : ΔE for trial move (mol_idx: -1=ins, ≥0=mov/del)
+    300       COMMIT_INSERT    : accept insertion  (mol_idx=-1, n_mol=1)
+    301       COMMIT_DELETE    : accept deletion   (mol_idx=deleted, n_mol=0)
+    302       COMMIT_MOVE      : accept move       (mol_idx=moved, n_mol=1)
+    303       SYNC_FULL        : full resync       (mol_idx=ads_comp, n_mol=N)
+    500       QUERY_TOTAL      : return E_current - E_fw_cached
 
 Usage:
-    python ase_ipi_server_mace.py \
-        --socket ase_ipi_socket \
+    python ase_ipi_server_mace.py \\
+        --socket ase_ipi_socket \\
         --model /path/to/model.pt
 """
 
 import argparse
+import json
 import os
 import socket
 import struct
 import sys
+import time
 
 import numpy as np
 from ase import Atoms
@@ -83,7 +77,7 @@ def recv_int32(conn):
 
 
 def send_doubles(conn, arr):
-    conn.sendall(arr.astype(np.float64).tobytes())
+    conn.sendall(np.asarray(arr, dtype=np.float64).tobytes())
 
 
 def recv_doubles(conn, n):
@@ -101,174 +95,406 @@ def _recvall(conn, n):
 
 
 # ---------------------------------------------------------------------------
-# iPI server loop
+# Atoms builders
+# ---------------------------------------------------------------------------
+def _build_atoms(fw_symbols, fw_positions, comp_molecules, comp_mol_syms, cell):
+    """Combine framework + all stored adsorbate molecules into one ASE Atoms."""
+    all_syms = list(fw_symbols)
+    all_pos  = [fw_positions]
+    for comp in sorted(comp_molecules.keys()):
+        mol_syms = comp_mol_syms.get(comp, [])
+        for mol_pos in comp_molecules[comp]:
+            if mol_syms and mol_pos.shape[0] != len(mol_syms):
+                raise ValueError(
+                    f"comp_mol_syms[{comp}] has {len(mol_syms)} symbols "
+                    f"but mol_pos has shape {mol_pos.shape} — "
+                    f"mismatch between symbol count and position rows")
+            all_syms.extend(mol_syms)
+            all_pos.append(mol_pos)
+    return Atoms(symbols=all_syms, positions=np.vstack(all_pos), cell=cell, pbc=True)
+
+
+def _ads_energy(comp_molecules, comp_mol_syms, cell, calc):
+    """Energy of all adsorbate molecules together, without the framework.
+
+    Uses the same periodic cell as the full system so that MACE sees the
+    same long-range environment.  Returns 0.0 when there are no adsorbates
+    (avoids running MACE on a zero-atom system).
+    """
+    atoms_ads = _build_atoms([], np.zeros((0, 3)), comp_molecules, comp_mol_syms, cell)
+    if len(atoms_ads) == 0:
+        return 0.0
+    atoms_ads.calc = calc
+    return atoms_ads.get_potential_energy()
+
+
+# ---------------------------------------------------------------------------
+# iPI handshake + species map
 # ---------------------------------------------------------------------------
 def do_handshake(conn, cell_hint):
-    """Perform the iPI handshake on an accepted connection."""
     send_header(conn, "STATUS")
     hdr = recv_header(conn)
     assert hdr == "NEEDINIT", f"Expected NEEDINIT, got {hdr}"
-
     send_header(conn, "INIT")
-    send_doubles(conn, cell_hint.flatten())                # 9 doubles
-    send_doubles(conn, np.linalg.inv(cell_hint).flatten()) # 9 doubles
+    send_doubles(conn, cell_hint.flatten())
+    send_doubles(conn, np.linalg.inv(cell_hint).flatten())
     print("Handshake complete")
 
 
 def recv_species_map(conn):
-    """Receive the species map sent by gRASPA immediately after handshake.
-
-    Returns:
-        species_map : dict  {int index -> str symbol}
-        n_fw        : int   framework atom count in ReplicaAtoms[0]
-    """
     hdr = recv_header(conn)
     assert hdr == "SPECIESMAP", f"Expected SPECIESMAP, got '{hdr}'"
-
     n_species = recv_int32(conn)
     n_fw      = recv_int32(conn)
-
     species_map = {}
     for _ in range(n_species):
         idx = recv_int32(conn)
         ln  = recv_int32(conn)
         sym = _recvall(conn, ln).decode("ascii")
         species_map[idx] = sym
-
     print(f"Received species map: {n_species} species, n_fw={n_fw}")
     for k, v in sorted(species_map.items()):
         print(f"  {k}: {v}")
-
     return species_map, n_fw
 
 
-def serve(conn, calc, species_map, n_fw):
-    """Run the iPI protocol main loop (handshake + species map already done).
+# ---------------------------------------------------------------------------
+# Main server loop
+# ---------------------------------------------------------------------------
+def _print_timing_summary(t):
+    print("\n=== SERVER TIMING PROFILE ===")
+    hdr = (f"  {'Category':<16} {'calls':>7} {'t_recv':>8} {'t_build':>8} "
+           f"{'t_mace_full':>11} {'t_mace_ads':>10} {'t_send':>8} {'total':>8} {'ms/call':>8}")
+    print(hdr)
+    for k, v in t.items():
+        if v['count'] == 0:
+            continue
+        tot = sum(vv for kk, vv in v.items() if kk != 'count')
+        avg = 1000.0 * tot / v['count']
+        print(f"  {k:<16} {v['count']:>7} {v['t_recv']:>8.3f} {v['t_build']:>8.3f} "
+              f"{v['t_mace_full']:>11.3f} {v['t_mace_ads']:>10.3f} {v['t_send']:>8.3f} "
+              f"{tot:>8.3f} {avg:>8.1f}")
+    print("=== END TIMING PROFILE ===\n")
+    sys.stdout.flush()
 
-    Server-side HG decomposition:
-      config_type=0          : startup prime — compute and cache E_fw
-      config_type>=100       : combined fw+ads call — return HG directly:
-                               HG = E(fw+ads) - cached_E_fw - E(ads alone)
 
-    species_map : {int -> str}  mapping from type index to element symbol
-    n_fw        : int           number of framework atoms in combined payloads
+def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_profile.json"):
+    """N-body iPI server loop.
+
+    State maintained between calls:
+      fw_symbols / fw_positions : framework atoms (set at FRAMEWORK_PRIME)
+      cached_E_fw               : E(framework alone)
+      comp_molecules[comp]      : list of np.ndarray (mol_size, 3) per component
+      comp_mol_syms[comp]       : element symbols for one molecule of each component
+      E_current                 : E(fw + all current adsorbates)
+      E_ads_current             : E(all current adsorbates, no framework)
+      pending_E                 : E(fw + trial adsorbates) from last DELTA_QUERY
+      pending_ads_E             : E(trial adsorbates, no fw) from last DELTA_QUERY
+      last_delta_comp           : ads_comp from most recent DELTA_QUERY
+
+    ΔE returned to C++ for DELTA_QUERY:
+      ΔE = [E(fw + trial_ads) - E(trial_ads)] - [E(fw + current_ads) - E(current_ads)]
+
+    This is the change in framework-adsorbate interaction energy evaluated by
+    the ML potential, with direct adsorbate-adsorbate energies subtracted out
+    (those are handled classically as GG in gRASPA).  Many-body effects that
+    involve the framework (fw-mediated ads-ads polarisation, etc.) are captured
+    because both full-system calls see all atoms simultaneously.
     """
-    step = 0
-    cached_E_fw = None   # primed by config_type=0 at startup
+    _timing = {k: {'count': 0, 't_recv': 0.0, 't_build': 0.0,
+                   't_mace_full': 0.0, 't_mace_ads': 0.0, 't_send': 0.0}
+               for k in ('FRAMEWORK', 'DELTA_QUERY', 'COMMIT_INSERT',
+                         'COMMIT_DELETE', 'COMMIT_MOVE', 'SYNC_FULL', 'QUERY_TOTAL')}
+    DELTA_QUERY_BASE = 200
+    COMMIT_INSERT    = 300
+    COMMIT_DELETE    = 301
+    COMMIT_MOVE      = 302
+    SYNC_FULL        = 303
+    QUERY_TOTAL      = 500
+
+    step            = 0
+    cached_E_fw     = None
+    fw_symbols      = None
+    fw_positions    = None
+    comp_molecules  = {}     # comp -> list of np.ndarray (mol_size, 3)
+    comp_mol_syms   = {}     # comp -> [symbol, ...] for one molecule
+    E_current       = None   # E(fw + all current ads)
+    E_ads_current   = 0.0    # E(all current ads, no fw); 0 when box is empty
+    pending_E       = None   # E(fw + trial ads) from last DELTA_QUERY
+    pending_ads_E   = 0.0    # E(trial ads, no fw) from last DELTA_QUERY
+    pending_mol     = None   # trial positions from last DELTA_QUERY
+    last_delta_comp = None
 
     while True:
-        # STATUS -> expect READY
-        send_header(conn, "STATUS")
-        hdr = recv_header(conn)
-        if hdr == "EXIT" or not hdr:
+        # ---- iPI STATUS / READY ----
+        try:
+            _t_recv_start = time.perf_counter()
+            send_header(conn, "STATUS")
+            hdr = recv_header(conn)
+        except (ConnectionError, BrokenPipeError, OSError) as e:
+            print(f"Connection lost during STATUS/READY: {e}")
+            break
+        if hdr in ("EXIT", ""):
             print("Client sent EXIT — shutting down")
             break
         if hdr != "READY":
             print(f"Warning: expected READY, got '{hdr}'")
             break
-
-        # POSDATA
         send_header(conn, "POSDATA")
 
-        # Receive routing fields
+        # ---- Parse header ----
         config_type = recv_int32(conn)
-        cell        = recv_doubles(conn, 9).reshape(3, 3)
-        _inv        = recv_doubles(conn, 9)   # discard client inv_cell
-        n_mol       = recv_int32(conn)
-        natoms      = recv_int32(conn)
 
-        # Types array (N × int32, network byte order)
-        types_raw = _recvall(conn, 4 * natoms)
-        types_arr = struct.unpack(f"!{natoms}i", types_raw)
-
-        # Positions
-        positions = recv_doubles(conn, 3 * natoms).reshape(natoms, 3)
-
-        # Build element symbols from per-atom type indices
-        try:
-            symbols = [species_map[t] for t in types_arr]
-        except KeyError as e:
-            print(f"ERROR: type index {e} not in species map {species_map}")
-            break
-
-        # Human-readable label for logging
-        if config_type == 0:
-            label = "framework"
-        elif config_type < 100:
-            label = f"adsorbate[{config_type}]"
+        # New protocol: config_type >= 200 carries mol_idx before cell
+        if config_type >= DELTA_QUERY_BASE:
+            mol_idx = recv_int32(conn)
         else:
-            label = f"total[{config_type - 100}] n_mol={n_mol}"
+            mol_idx = None
 
-        # ---- Energy evaluation ----
+        cell   = recv_doubles(conn, 9).reshape(3, 3)
+        _inv   = recv_doubles(conn, 9)   # discarded
+        n_mol  = recv_int32(conn)
+        natoms = recv_int32(conn)
+
+        if natoms > 0:
+            types_raw = _recvall(conn, 4 * natoms)
+            types_arr = struct.unpack(f"!{natoms}i", types_raw)
+            positions = recv_doubles(conn, 3 * natoms).reshape(natoms, 3)
+            symbols   = [species_map[t] for t in types_arr]
+        else:
+            types_arr = ()
+            positions = np.zeros((0, 3), dtype=np.float64)
+            symbols   = []
+        _t_recv_end = time.perf_counter()
+
+        # ---- Route ----
+        energy = 0.0
+        label  = f"config_type={config_type}"
+        _t_build = 0.0; _t_mace_full = 0.0; _t_mace_ads = 0.0
+        _timing_key = None
+
         if config_type == 0:
-            # Startup cache-priming call: framework atoms only.
-            # Compute E_fw and cache it; return it to C++ for logging.
-            atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=True)
-            atoms.calc = calc
-            cached_E_fw = atoms.get_potential_energy()
+            # Framework prime: cache E_fw, initialise state
+            _timing_key = 'FRAMEWORK'
+            fw_symbols    = list(symbols)    # explicit copy — not an alias
+            fw_positions  = positions.copy()
+            _tb = time.perf_counter()
+            atoms_fw = Atoms(symbols=fw_symbols, positions=fw_positions,
+                             cell=cell, pbc=True)
+            atoms_fw.calc = calc
+            _t_build = time.perf_counter() - _tb
+            _tm = time.perf_counter()
+            cached_E_fw   = atoms_fw.get_potential_energy()
+            _t_mace_full = time.perf_counter() - _tm
+            E_current     = cached_E_fw   # zero adsorbates → E_current = E_fw
+            E_ads_current = 0.0           # no adsorbates yet
             energy = cached_E_fw
-            forces = atoms.get_forces()
+            label  = "framework"
             print(f"  E_fw cached: {cached_E_fw:.6f} eV")
 
-        elif config_type >= 100:
-            # Combined fw + adsorbates call (n_mol >= 1).
-            # Perform two ML evaluations and return HG directly.
-            if cached_E_fw is None:
-                raise RuntimeError(
-                    "Framework cache not primed — send config_type=0 first")
+        elif DELTA_QUERY_BASE <= config_type < COMMIT_INSERT:
+            # DELTA_QUERY: compute ΔE = Δ(E_full - E_ads)
+            #   = [E(fw+trial_ads) - E(trial_ads)] - [E(fw+cur_ads) - E(cur_ads)]
+            _timing_key = 'DELTA_QUERY'
+            ads_comp        = config_type - DELTA_QUERY_BASE
+            last_delta_comp = ads_comp
 
-            # E(fw + all ads together)
-            atoms_combined = Atoms(
-                symbols=symbols, positions=positions, cell=cell, pbc=True)
-            atoms_combined.calc = calc
-            E_combined = atoms_combined.get_potential_energy()
+            # Build trial molecule lists (shallow-copy to avoid mutating state)
+            trial_mols = {c: list(mols) for c, mols in comp_molecules.items()}
+            mol_list   = list(trial_mols.get(ads_comp, []))
 
-            # E(ads alone) — strip framework atoms
-            ads_positions = positions[n_fw:]
-            ads_symbols   = symbols[n_fw:]
-            atoms_ads = Atoms(
-                symbols=ads_symbols, positions=ads_positions, cell=cell, pbc=True)
-            atoms_ads.calc = calc
-            E_ads = atoms_ads.get_potential_energy()
+            if mol_idx == -1:
+                # Insertion
+                pending_mol = positions.copy()
+                mol_list.append(pending_mol)
+                if ads_comp not in comp_mol_syms and symbols:
+                    comp_mol_syms[ads_comp] = symbols
+                move_str = "INS"
+            elif natoms == 0:
+                # Deletion: swap-with-last (mirrors C++ Update_deletion_data)
+                pending_mol = None
+                if 0 <= mol_idx < len(mol_list):
+                    mol_list[mol_idx] = mol_list[-1]
+                    mol_list.pop()
+                else:
+                    print(f"  WARNING: DELTA_QUERY DEL mol_idx={mol_idx} "
+                          f"out of range (n={len(mol_list)})")
+                move_str = "DEL"
+            else:
+                # Move / reinsertion
+                pending_mol = positions.copy()
+                if 0 <= mol_idx < len(mol_list):
+                    mol_list[mol_idx] = pending_mol
+                else:
+                    print(f"  WARNING: DELTA_QUERY MOV mol_idx={mol_idx} "
+                          f"out of range (n={len(mol_list)})")
+                move_str = "MOV"
 
-            # HG = E(fw+ads) − E_fw − E(ads)
-            energy = E_combined - cached_E_fw - E_ads
-            forces = np.zeros((natoms, 3))   # forces not used by gRASPA
-            print(f"  E_combined={E_combined:.6f}  E_fw={cached_E_fw:.6f}  "
-                  f"E_ads={E_ads:.6f}  HG={energy:.6f} eV")
+            trial_mols[ads_comp] = mol_list
+
+            # Full system energy (fw + all trial adsorbates)
+            _tb = time.perf_counter()
+            atoms_trial = _build_atoms(fw_symbols, fw_positions,
+                                       trial_mols, comp_mol_syms, cell)
+            atoms_trial.calc = calc
+            _t_build = time.perf_counter() - _tb
+            _tm = time.perf_counter()
+            E_full_trial = atoms_trial.get_potential_energy()
+            _t_mace_full = time.perf_counter() - _tm
+
+            # Adsorbate-only energy (same positions, no framework atoms)
+            _ta = time.perf_counter()
+            E_ads_trial = _ads_energy(trial_mols, comp_mol_syms, cell, calc)
+            _t_mace_ads = time.perf_counter() - _ta
+
+            pending_E     = E_full_trial
+            pending_ads_E = E_ads_trial
+
+            # ΔE = Δ(fw-ads interaction) — direct ads-ads energy cancels out
+            energy = (E_full_trial - E_ads_trial) - (E_current - E_ads_current)
+
+            label = (f"DELTA_QUERY comp={ads_comp} {move_str} "
+                     f"mol_idx={mol_idx} natoms={natoms} "
+                     f"n_stored={len(comp_molecules.get(ads_comp, []))}")
+            print(f"  {label}")
+            print(f"    E_full={E_full_trial:.6f}  E_ads={E_ads_trial:.6f}  "
+                  f"E_cur={E_current:.6f}  E_ads_cur={E_ads_current:.6f}  "
+                  f"dE={energy:.6f} eV")
+
+        elif config_type == COMMIT_INSERT:
+            _timing_key = 'COMMIT_INSERT'
+            ads_comp = last_delta_comp
+            if ads_comp not in comp_molecules:
+                comp_molecules[ads_comp] = []
+            comp_molecules[ads_comp].append(pending_mol)
+            if ads_comp not in comp_mol_syms and symbols:
+                comp_mol_syms[ads_comp] = symbols
+            E_current     = pending_E
+            E_ads_current = pending_ads_E
+            label = (f"COMMIT_INSERT comp={ads_comp} "
+                     f"n_stored={len(comp_molecules[ads_comp])}")
+            print(f"  {label}  E_current={E_current:.6f}  "
+                  f"E_ads_current={E_ads_current:.6f} eV")
+
+        elif config_type == COMMIT_DELETE:
+            _timing_key = 'COMMIT_DELETE'
+            ads_comp = last_delta_comp
+            mols = comp_molecules.get(ads_comp, [])
+            if 0 <= mol_idx < len(mols):
+                mols[mol_idx] = mols[-1]
+                mols.pop()
+            else:
+                print(f"  WARNING: COMMIT_DELETE mol_idx={mol_idx} "
+                      f"out of range (n={len(mols)})")
+            E_current     = pending_E
+            E_ads_current = pending_ads_E
+            label = (f"COMMIT_DELETE comp={ads_comp} mol_idx={mol_idx} "
+                     f"n_stored={len(mols)}")
+            print(f"  {label}  E_current={E_current:.6f}  "
+                  f"E_ads_current={E_ads_current:.6f} eV")
+
+        elif config_type == COMMIT_MOVE:
+            _timing_key = 'COMMIT_MOVE'
+            ads_comp = last_delta_comp
+            mols = comp_molecules.get(ads_comp, [])
+            if 0 <= mol_idx < len(mols):
+                mols[mol_idx] = pending_mol
+            else:
+                print(f"  WARNING: COMMIT_MOVE mol_idx={mol_idx} "
+                      f"out of range (n={len(mols)})")
+            E_current     = pending_E
+            E_ads_current = pending_ads_E
+            label = f"COMMIT_MOVE comp={ads_comp} mol_idx={mol_idx}"
+            print(f"  {label}  E_current={E_current:.6f}  "
+                  f"E_ads_current={E_ads_current:.6f} eV")
+
+        elif config_type == SYNC_FULL:
+            # mol_idx encodes ads_comp for SYNC_FULL
+            _timing_key = 'SYNC_FULL'
+            ads_comp = mol_idx
+            mol_size = natoms // n_mol if n_mol > 0 else 0
+            mols     = []
+            mol_syms_one = symbols[:mol_size] if mol_size > 0 else []
+            for i in range(n_mol):
+                mols.append(positions[i * mol_size:(i + 1) * mol_size].copy())
+            comp_molecules[ads_comp] = mols
+            if mol_syms_one:
+                comp_mol_syms[ads_comp] = mol_syms_one
+            # Recompute E_current and E_ads_current from scratch
+            _tb = time.perf_counter()
+            atoms_full = _build_atoms(fw_symbols, fw_positions,
+                                      comp_molecules, comp_mol_syms, cell)
+            atoms_full.calc = calc
+            _t_build = time.perf_counter() - _tb
+            _tm = time.perf_counter()
+            E_current     = atoms_full.get_potential_energy()
+            _t_mace_full = time.perf_counter() - _tm
+            _ta = time.perf_counter()
+            E_ads_current = _ads_energy(comp_molecules, comp_mol_syms, cell, calc)
+            _t_mace_ads = time.perf_counter() - _ta
+            energy = (E_current - E_ads_current) - cached_E_fw
+            label = (f"SYNC_FULL comp={ads_comp} n_mol={n_mol} "
+                     f"total_atoms={len(atoms_full)}")
+            print(f"  {label}")
+            print(f"    E_current={E_current:.6f}  E_ads={E_ads_current:.6f}  "
+                  f"HG_int={energy:.6f} eV")
+
+        elif config_type == QUERY_TOTAL:
+            # Return pure fw-ads interaction energy (ads-ads handled as GG in gRASPA)
+            _timing_key = 'QUERY_TOTAL'
+            energy = (E_current - E_ads_current) - cached_E_fw
+            label  = "QUERY_TOTAL"
+            print(f"  QUERY_TOTAL  E_current={E_current:.6f}  "
+                  f"E_ads={E_ads_current:.6f}  E_fw={cached_E_fw:.6f}  "
+                  f"HG_int={energy:.6f} eV")
 
         else:
-            # Fallback: standalone adsorbate-only or unrecognised config (not
-            # used in normal flow but kept for completeness).
-            atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=True)
-            atoms.calc = calc
-            energy = atoms.get_potential_energy()
-            forces = atoms.get_forces()
+            print(f"  Unknown config_type={config_type} — returning 0")
 
         step += 1
-        print(f"  step {step:4d}  {label:45s}  config_type={config_type:4d}  "
+        print(f"  step {step:5d}  {label}  config_type={config_type:4d}  "
               f"natoms={natoms:5d}  n_mol={n_mol}  E={energy:14.6f} eV")
 
-        # STATUS -> expect HAVEDATA
+        # ---- iPI FORCEREADY response ----
+        _t_send_start = time.perf_counter()
         send_header(conn, "STATUS")
         hdr = recv_header(conn)
         if hdr != "HAVEDATA":
             print(f"Warning: expected HAVEDATA, got '{hdr}'")
             break
 
-        # GETFORCE → FORCEREADY + energy + natoms + forces + virial + extras
         send_header(conn, "GETFORCE")
         send_header(conn, "FORCEREADY")
-        send_doubles(conn, np.array([energy]))    # 1 double
-        send_int32(conn, natoms)                   # int32
-        send_doubles(conn, forces.flatten())       # 3*natoms doubles
-        send_doubles(conn, np.zeros(9))            # virial (9 doubles)
-        send_int32(conn, 0)                        # extras length
+        send_doubles(conn, np.array([energy]))  # energy scalar
+        send_int32(conn, 1)                     # natoms=1 (avoids empty-read in C++)
+        send_doubles(conn, np.zeros(3))         # forces for 1 dummy atom
+        send_doubles(conn, np.zeros(9))         # virial
+        send_int32(conn, 0)                     # extras length
+        _t_send_end = time.perf_counter()
+
+        # ---- Accumulate timing ----
+        if _timing_key is not None:
+            _timing[_timing_key]['count']      += 1
+            _timing[_timing_key]['t_recv']     += _t_recv_end - _t_recv_start
+            _timing[_timing_key]['t_build']    += _t_build
+            _timing[_timing_key]['t_mace_full'] += _t_mace_full
+            _timing[_timing_key]['t_mace_ads'] += _t_mace_ads
+            _timing[_timing_key]['t_send']     += _t_send_end - _t_send_start
+
+    # ---- End-of-session summary ----
+    _print_timing_summary(_timing)
+    os.makedirs(os.path.dirname(os.path.abspath(profile_output)), exist_ok=True)
+    with open(profile_output, 'w') as f:
+        json.dump(_timing, f, indent=2)
+    print(f"Timing profile written to {profile_output}", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Custom iPI server for gRASPA + ML potentials"
+        description="N-body iPI server for gRASPA + ML potentials"
     )
     parser.add_argument("--socket", "-s", default="ase_ipi_socket",
                         help="UNIX socket name (creates /tmp/<name>)")
@@ -279,24 +505,26 @@ def main():
                         help="Device for calculator (default: cpu)")
     parser.add_argument("--dtype", default="float64",
                         choices=["float32", "float64"],
-                        help="Floating point precision (default: float64)")
-    # --species-file kept for backwards-compatible CLI; no longer used
+                        help="Floating-point precision (default: float64)")
     parser.add_argument("--species-file", default=None,
                         help="(deprecated, ignored) species file path")
+    parser.add_argument("--profile-output", default="./runs/profiles/server_profile.json",
+                        help="Path to write JSON timing profile (default: ./runs/profiles/server_profile.json)")
     args = parser.parse_args()
 
+    # Force line-buffered stdout so prints appear immediately even when
+    # stdout is redirected to a file or pipe (default is block-buffered).
+    sys.stdout.reconfigure(line_buffering=True)
+
     if args.species_file is not None:
-        print("Note: --species-file is deprecated; species map is now "
-              "sent by gRASPA at connection time.")
+        print("Note: --species-file is deprecated; species map is sent by gRASPA.")
 
     print("=" * 60)
-    print("gRASPA iPI Server (species-map protocol)")
+    print("gRASPA iPI Server (N-body protocol)")
     print("=" * 60)
 
-    # 1. Load calculator first so GPU memory is allocated before gRASPA connects.
     calc = get_calculator(args)
 
-    # 2. Create listener.
     sock_path = f"/tmp/{args.socket}"
     if os.path.exists(sock_path):
         os.unlink(sock_path)
@@ -306,7 +534,6 @@ def main():
     srv.listen(1)
     print(f"Listening on {sock_path}")
 
-    # Dummy cell for INIT handshake (client sends real cell with POSDATA)
     cell_hint = np.eye(3) * 10.0
 
     try:
@@ -315,10 +542,8 @@ def main():
             conn, _ = srv.accept()
             print("Client connected")
 
-            # 3. iPI handshake
             do_handshake(conn, cell_hint)
 
-            # 4. Receive species map (sent by gRASPA right after handshake)
             try:
                 species_map, n_fw = recv_species_map(conn)
             except (AssertionError, ConnectionError) as e:
@@ -327,7 +552,7 @@ def main():
                 continue
 
             try:
-                serve(conn, calc, species_map, n_fw)
+                serve(conn, calc, species_map, n_fw, args.profile_output)
             except (ConnectionError, BrokenPipeError) as e:
                 print(f"Connection lost: {e}")
             finally:
