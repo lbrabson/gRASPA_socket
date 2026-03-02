@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-MODEL="${1:-/path/to/mace_model.pt}"
+MODEL="${1:-/storage/home/hcoda1/8/lbrabson3/r-amedford6-0/mace-mpa-0-medium.model}"
 SOCKET_NAME="ase_ipi_socket"
 SPECIES_FILE="socket_species.txt"
 
@@ -41,7 +41,7 @@ fi
 echo "Server socket ready after ${WAIT}s."
 
 echo "Starting gRASPA..."
-./nvc_main.x   # writes socket_species.txt during init, then connects
+./patch_Socket/nvc_main.x   # writes socket_species.txt during init, then connects
 
 echo "gRASPA finished. Stopping server..."
 kill "${SERVER_PID}" 2>/dev/null || true

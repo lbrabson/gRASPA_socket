@@ -29,7 +29,13 @@ struct Socket
     std::vector<std::string> ElementSymbolUsed;
     std::vector<int>Match_Element_PseudoAtom_order; //length = # of PseudoAtoms, value stored = order in the Socket//
 
-    char socket_path[108] = "/tmp/ase_ipi_socket";  // UNIX path limit
+    char socket_path[108];  
+    Socket() {
+        const char* env_path = std::getenv("GRASPA_SOCKET_PATH");
+        std::strncpy(socket_path, env_path ? env_path : "/tmp/ase_ipi_socket", 107);
+        socket_path[107] = '\0';
+    }
+
     int    fd     = -1;   // UNIX socket file descriptor
     size_t natoms = 0;    // number of atoms sent in last call
 
@@ -137,7 +143,7 @@ struct Socket
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
-        printf("Connecting to CHGNet server at: %s\n", socket_path);
+        printf("Connecting to MLIP server at: %s\n", socket_path);
 
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             perror("connect");
@@ -383,12 +389,12 @@ struct Socket
 
         natoms = n_atoms;
 
-        printf("[CLIENT] POSDATA natoms=%zu config_type=%d n_mol=%d\n",
-               natoms, (int)config_type, (int)n_mol);
-        for (size_t i = 0; i < std::min(natoms, (size_t)5); i++)
-            printf("  atom %zu: %.5f %.5f %.5f type=%d\n",
-                   i, xyz[3*i], xyz[3*i+1], xyz[3*i+2], (int)types[i]);
-        fflush(stdout);
+        //printf("[CLIENT] POSDATA natoms=%zu config_type=%d n_mol=%d\n",
+        //       natoms, (int)config_type, (int)n_mol);
+        //for (size_t i = 0; i < std::min(natoms, (size_t)5); i++)
+        //    printf("  atom %zu: %.5f %.5f %.5f type=%d\n",
+        //           i, xyz[3*i], xyz[3*i+1], xyz[3*i+2], (int)types[i]);
+        //fflush(stdout);
 
         send_positions(xyz, types, n_atoms, config_type, n_mol);
 
@@ -429,7 +435,7 @@ struct Socket
         // Python returns HG = E(fw+ads) - E_fw_cached - E(ads) directly
         double HG_ev = PredictFromSocket(xyz_total.data(), types_total.data(),
                                          n_total, (int32_t)(100 + ads_comp), 1);
-        printf("ML HG_ev = %.6f eV\n", HG_ev);
+        //printf("ML HG_ev = %.6f eV\n", HG_ev);
         return HG_ev;
     }
 

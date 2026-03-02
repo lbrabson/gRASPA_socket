@@ -5,8 +5,12 @@ NumberOfInitializationCycles 20000
 NumberOfEquilibrationCycles  0
 NumberOfProductionCycles     20000
 
+NumberOfTrialPositions  8
+NumberOfTrialOrientations   8
+
 UseMaxStep  yes
 MaxStepPerCycle 1
+PrintEvery 200
 
 UseChargesFromCIFFile yes
 
@@ -19,11 +23,11 @@ SingleSimulation yes
 
 DifferentFrameworks yes
 InputFileType cif
-FrameworkName calf20_ddec
+FrameworkName calf20_ddec_super
 UnitCells 0 1 1 1
 
 ChargeMethod Ewald
-Temperature 323
+Temperature 298
 Pressure 113276.104
 
 OverlapCriteria 1e5
@@ -35,11 +39,12 @@ UseDNNforHostGuest yes
 DNNModelName Socket
 DNNMethod Socket
 DNNEnergyUnits eV
-MaxDNNDrift 100000
+MaxDNNDrift 100000000
 
 Component 0 MoleculeName             CO2
+            TURN_OFF_CBMC_SWAP       yes
             IdealGasRosenbluthWeight 1.0
-            FugacityCoefficient      1.0
+            FugacityCoefficient      PR-EOS
             TranslationProbability   1.0
             RotationProbability      1.0
             ReinsertionProbability   1.0

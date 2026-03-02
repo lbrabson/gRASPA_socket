@@ -43,7 +43,7 @@ import sys
 
 import numpy as np
 from ase import Atoms
-
+import cuequivariance
 
 # ---------------------------------------------------------------------------
 # Calculator factory — edit this function to swap models
@@ -56,6 +56,7 @@ def get_calculator(args):
         model=args.model,
         device=args.device,
         default_dtype=args.dtype,
+        enable_cueq=True
     )
     print(f"Loaded MACE model: {args.model}  device={args.device}")
     return calc

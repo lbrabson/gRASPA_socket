@@ -1,0 +1,202 @@
+---------------------------------------
+Begin Slurm Prolog: Mar-02-2026 15:29:18
+Job ID:    4556704
+User ID:   lbrabson3
+Account:   gts-amedford6-paid
+Job name:  gcmc
+Partition: gpu-a100
+QOS:       inferno
+---------------------------------------
+
+CondaError: Run 'conda init' before 'conda deactivate'
+
+Starting MACE iPI server (model: /storage/home/hcoda1/8/lbrabson3/r-amedford6-0/mace-mpa-0-medium.model)...
+Waiting for server socket: /tmp/ase_ipi_socket ...
+/storage/home/hcoda1/8/lbrabson3/.conda/envs/mlipmc_mace/lib/python3.12/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/storage/home/hcoda1/8/lbrabson3/.conda/envs/mlipmc_mace/lib/python3.12/site-packages/mace/calculators/mace.py:199: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  torch.load(f=model_path, map_location=device)
+/storage/home/hcoda1/8/lbrabson3/.conda/envs/mlipmc_mace/lib/python3.12/site-packages/torch/jit/_serialization.py:176: DeprecationWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/storage/home/hcoda1/8/lbrabson3/.conda/envs/mlipmc_mace/lib/python3.12/site-packages/torch/jit/_serialization.py:176: DeprecationWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/storage/home/hcoda1/8/lbrabson3/.conda/envs/mlipmc_mace/lib/python3.12/site-packages/torch/jit/_serialization.py:176: DeprecationWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/storage/home/hcoda1/8/lbrabson3/.conda/envs/mlipmc_mace/lib/python3.12/site-packages/mace/modules/models.py:85: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.int64)
+Server socket ready after 17s.
+Starting gRASPA...
+/storage/project/r-amedford6-0/lbrabson3/gRASPA_dir/gRASPA_socket-adsorbate-patch/patch_Socket/nvc_main.x------------------GENERAL SIMULATION SETUP-------------
+Finished Checking Number of Components, There are 1 framework, 1 Adsorbates, 2 total Components
+DNN Model Name: Socket
+DONE Reading Model Info from simulation.input file
+Setting Maximum Number of Steps for a Cycle, Max Step = 1
+-------------------------------------------------------
+device_random[0] = 2.30000 4.50000 6.70000
+================FUGACITY COEFFICIENT CALCULATION================
+Checking: Current Fugacity Coeff for 1 component: -1.00000
+Component 1 needs PR-EOS for fugacity coeff (negative value), going to ignore the fugacity coefficient for other components and calculate all using PR-EOS!start calculating fugacity, Pressure: 113276.10400, Temperature: 298.00000
+Component 1, Pc: 7377300.00000, Tc: 304.12820, Ac: 0.22394
+Component Mol Fraction: 1.00000
+kappa: 0.70648, alpha: 1.01436
+==========================================
+====== Preparing Simulation box 0 ======
+==========================================
+Parsing [1] Component
+-------------- READING AdsorbateComponent 0 (CO2) --------------
+==================================================
+ACCUMULATED Probabilities:
+Translation Probability:      0.25000
+Rotation Probability:         0.50000
+Special Rotation Probability: 0.50000
+Widom Probability:            0.50000
+Reinsertion Probability:      0.75000
+Identity Swap Probability:    0.75000
+CBCF Swap Probability:        0.75000
+Swap Probability:             1.00000
+Volume Probability:           1.00000
+Gibbs Swap Probability:       1.00000
+Gibbs Volume Probability:     1.00000
+Sum of Probabilities:         1.00000
+==================================================
+-------------- END OF READING Component 0 (CO2) --------------
+1
+Number of Solutions: 1
+TempComponents.AmountOfExcessMolecules for component 0 is 0.0000000000; Compressibility: 0.9937826438
+Fugacity Coefficient for component 1 is 0.9938114077
+Check: Computed FugaCoeff for 0, 0 is 0.9938114077
+================END OF FUGACITY COEFFICIENT CALCULATION================
+----------------- MEMORY ALLOCAION STATUS -----------------
+System allocate_sizes are: 1188, 10240
+Component allocate_sizes are: 1188, 10240
+Allocated Blocksum size: 12801, vdw_real size: 12801, fourier_size: 0
+------------------------------------------------------------
+------------------- SIMULATION BOX PARAMETERS -----------------
+Pressure:        0.00682
+Box Volume:      19903.43092
+Box Beta:        0.00404
+Box Temperature: 298.00000
+---------------------------------------------------------------
+W0302 15:29:40.479000 455567 /storage/project/r-amedford6-0/lbrabson3/.conda/envs/mlipmc_mace/lib/python3.12/site-packages/torch/fx/_symbolic_trace.py:53] is_fx_tracing will return true for both fx.symbolic_trace and torch.export. Please use is_fx_tracing_symbolic_tracing() for specifically fx.symbolic_trace or torch.compiler.is_compiling() for specifically torch.export/compile.
+======================== CALCULATING INITIAL STAGE ENERGY ========================
+****** Calculating VDW + Real Energy (CPU) ******
+Host-Host   VDW: 0.00000; Real: 0.00000
+Host-Guest  VDW: 0.00000; Real: 0.00000
+Guest-Guest VDW: 0.00000; Real: 0.00000
+********** PRINTING COMPONENT ENERGIES**********
+Compoent [0-0], VDW: 0.00000, Real: 0.00000
+Compoent [0-1], VDW: 0.00000, Real: 0.00000
+Compoent [1-1], VDW: 0.00000, Real: 0.00000
+****** Calculating Ewald Energy (CPU) ******
+CPU Guest-Guest Fourier: 0.00000, Host-Host Fourier: 7037.08874, Framework-Guest Fourier: 0.00000
+Component: 0, SelfAtomE: 3036079.51635 (3651566.56459 kJ/mol)
+Component: 1, SelfAtomE: 0.00000 (0.00000 kJ/mol)
+Component: 0, Intra-Molecular ExclusionE: 3068090.83192 (3690067.35122 kJ/mol)
+Component: 1, Intra-Molecular ExclusionE: 0.00000 (0.00000 kJ/mol)
+HostEwald took 0.08565 sec
+Ewald Summation (total energy) on the CPU took 0.08566 secs
+Component 0, Intra Exclusion Energy: -3068090.83192 (-3690067.35122 kJ/mol)
+Component 0, Atom Self Exclusion Energy: 3036079.51635 (3651566.56459 kJ/mol)
+DEBUG: comp: 0, IntraE: -3068090.83192, SelfE: 3036079.51635
+Component 1, Intra Exclusion Energy: -14237.48390 (-17123.76764 kJ/mol)
+Component 1, Atom Self Exclusion Energy: 14272.83586 (17166.28630 kJ/mol)
+DEBUG: comp: 1, IntraE: -14237.48390, SelfE: 14272.83586
+******   Allocating Ewald WaveVectors + StructureFactors (INITIAL STAGE ONLY)   ******
+Allocated 38016 42768 38016 space for eikxyz
+Structure Factor 0 is 0.00000 0.00000
+Structure Factor 1 is 0.00000 0.00000
+Structure Factor 2 is 0.00000 0.00000
+Structure Factor 3 is 0.00000 0.00000
+Structure Factor 4 is 0.00000 0.00000
+Structure Factor 5 is 0.00000 0.00000
+Structure Factor 6 is 0.00000 0.00000
+Structure Factor 7 is 0.00000 0.00000
+Structure Factor 8 is 0.00000 0.00000
+Structure Factor 9 is 0.00000 0.00000
+****** DONE Allocating Ewald WaveVectors + StructureFactors(INITIAL STAGE ONLY) ******
+ ****** CHECKING StructureFactors (SF) Stored on CPU vs. GPU ****** 
+CPU SF: 2040, GPU SF: 2040
+StructureFactor 0, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 1, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 2, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 3, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 4, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 5, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 6, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 7, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 8, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 9, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+ ****** CHECKING Framework StructureFactors Stored on CPU ****** 
+Framework Structure Factor 0, real: 0.00000 imag: 0.00000
+Framework Structure Factor 1, real: 0.00000 imag: 0.00000
+Framework Structure Factor 2, real: 0.00000 imag: 0.00000
+Framework Structure Factor 3, real: 0.00000 imag: 0.00000
+Framework Structure Factor 4, real: 0.00000 imag: 0.00000
+Framework Structure Factor 5, real: 0.00000 imag: 0.00000
+Framework Structure Factor 6, real: 0.00000 imag: -0.00000
+Framework Structure Factor 7, real: 0.00000 imag: 0.00000
+Framework Structure Factor 8, real: -0.00000 imag: 0.00000
+Framework Structure Factor 9, real: 0.00000 imag: 0.00000
+VDW + Real on the GPU took 0.00000 secs
+Ewald Summation (total energy) on the GPU took 0.00042 secs
+Total GPU Energy: 
+====================== DONE CALCULATING INITIAL STAGE ENERGY ======================
+Component 1, Need to create 0 full molecule
+======================== CALCULATING CREATE_MOLECULE STAGE ENERGY ========================
+****** Calculating VDW + Real Energy (CPU) ******
+Host-Host   VDW: 0.00000; Real: 0.00000
+Host-Guest  VDW: 0.00000; Real: 0.00000
+Guest-Guest VDW: 0.00000; Real: 0.00000
+********** PRINTING COMPONENT ENERGIES**********
+Compoent [0-0], VDW: 0.00000, Real: 0.00000
+Compoent [0-1], VDW: 0.00000, Real: 0.00000
+Compoent [1-1], VDW: 0.00000, Real: 0.00000
+****** Calculating Ewald Energy (CPU) ******
+CPU Guest-Guest Fourier: 0.00000, Host-Host Fourier: 7037.08874, Framework-Guest Fourier: 0.00000
+Component: 0, SelfAtomE: 3036079.51635 (3651566.56459 kJ/mol)
+Component: 1, SelfAtomE: 0.00000 (0.00000 kJ/mol)
+Component: 0, Intra-Molecular ExclusionE: 3068090.83192 (3690067.35122 kJ/mol)
+Component: 1, Intra-Molecular ExclusionE: 0.00000 (0.00000 kJ/mol)
+HostEwald took 0.08445 sec
+Ewald Summation (total energy) on the CPU took 0.08446 secs
+ ****** CHECKING StructureFactors (SF) Stored on CPU vs. GPU ****** 
+CPU SF: 2040, GPU SF: 2040
+StructureFactor 0, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 1, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 2, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 3, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 4, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 5, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 6, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 7, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 8, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 9, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+ ****** CHECKING Framework StructureFactors Stored on CPU ****** 
+Framework Structure Factor 0, real: 0.00000 imag: 0.00000
+Framework Structure Factor 1, real: 0.00000 imag: 0.00000
+Framework Structure Factor 2, real: 0.00000 imag: 0.00000
+Framework Structure Factor 3, real: 0.00000 imag: 0.00000
+Framework Structure Factor 4, real: 0.00000 imag: 0.00000
+Framework Structure Factor 5, real: 0.00000 imag: 0.00000
+Framework Structure Factor 6, real: 0.00000 imag: -0.00000
+Framework Structure Factor 7, real: 0.00000 imag: 0.00000
+Framework Structure Factor 8, real: -0.00000 imag: 0.00000
+Framework Structure Factor 9, real: 0.00000 imag: 0.00000
+VDW + Real on the GPU took 0.00000 secs
+Ewald Summation (total energy) on the GPU took 0.00026 secs
+Total GPU Energy: 
+====================== DONE CALCULATING CREATE_MOLECULE STAGE ENERGY ======================
+Running Simulation Boxes in SERIAL, currently [0] box; pres: 113276.10400 [Pa], temp: 298.00000 [K]
+==================================
+== RUNNING INITIALIZATION PHASE ==
+==================================
+CBMC Uses 8 trial positions and 8 trial orientations
+Box 0, Volume: 19903.43092
+Total Volume: 19903.43092
+INITIALIZATION Cycle: 0, 0 Adsorbate Molecules, Total Energy: 0.00000  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 0 Molecules  ||  
+INITIALIZATION Cycle: 200, 1 Adsorbate Molecules, Total Energy: -5971.25880  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 1 Molecules  ||  
+INITIALIZATION Cycle: 400, 1 Adsorbate Molecules, Total Energy: -5761.27829  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 1 Molecules  ||  
+INITIALIZATION Cycle: 600, 2 Adsorbate Molecules, Total Energy: -10845.40596  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 2 Molecules  ||  
+INITIALIZATION Cycle: 800, 3 Adsorbate Molecules, Total Energy: -15389.43867  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 3 Molecules  ||  
+INITIALIZATION Cycle: 1000, 3 Adsorbate Molecules, Total Energy: -17850.76695  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 3 Molecules  ||  
+INITIALIZATION Cycle: 1200, 3 Adsorbate Molecules, Total Energy: -17530.46089  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 3 Molecules  ||  
