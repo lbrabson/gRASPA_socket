@@ -235,8 +235,8 @@ def serve(conn, calc, species_map, n_fw):
             # HG = E(fw+ads) − E_fw − E(ads)
             energy = E_combined - cached_E_fw - E_ads
             forces = np.zeros((natoms, 3))   # forces not used by gRASPA
-            print(f"  E_combined={E_combined:.6f}  E_fw={cached_E_fw:.6f}  "
-                  f"E_ads={E_ads:.6f}  HG={energy:.6f} eV")
+            #print(f"  E_combined={E_combined:.6f}  E_fw={cached_E_fw:.6f}  "
+            #      f"E_ads={E_ads:.6f}  HG={energy:.6f} eV")
 
         else:
             # Fallback: standalone adsorbate-only or unrecognised config (not
@@ -247,8 +247,8 @@ def serve(conn, calc, species_map, n_fw):
             forces = atoms.get_forces()
 
         step += 1
-        print(f"  step {step:4d}  {label:45s}  config_type={config_type:4d}  "
-              f"natoms={natoms:5d}  n_mol={n_mol}  E={energy:14.6f} eV")
+        #print(f"  step {step:4d}  {label:45s}  config_type={config_type:4d}  "
+        #      f"natoms={natoms:5d}  n_mol={n_mol}  E={energy:14.6f} eV")
 
         # STATUS -> expect HAVEDATA
         send_header(conn, "STATUS")

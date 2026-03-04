@@ -10,7 +10,26 @@ PATCH_SOCKET_MAIN_PREP
         printf("Setting up Socket model\n");
         //Vars.SystemComponents[a].DNN.ReadModel(Vars.SystemComponents[a].ModelName[0]);
         printf("DONE Reading the model, model name %s\n", Vars.SystemComponents[a].ModelName[0].c_str());
-        Vars.SystemComponents[a].DNN.ElementSymbolUsed = Vars.SystemComponents[a].PseudoAtoms.UniqueSymbol;
+
+        // save pseudo atom symbols but ignore massless sites
+        //Vars.SystemComponents[a].DNN.ElementSymbolUsed = Vars.SystemComponents[a].PseudoAtoms.UniqueSymbol;
+        std::vector<std::string> filteredSymbols;
+        for(const std::string& sym : Vars.SystemComponents[a].PseudoAtoms.UniqueSymbol)
+        {
+            bool hasMass = false;
+            for(size_t i = 0; i < Vars.SystemComponents[a].PseudoAtoms.Symbol.size(); i++)
+            {
+                if(Vars.SystemComponents[a].PseudoAtoms.Symbol[i] == sym &&
+                  Vars.SystemComponents[a].PseudoAtoms.mass[i] > 0.0)
+                {
+                    hasMass = true;
+                    break;
+                }
+            }
+            if(hasMass) filteredSymbols.push_back(sym);
+        }
+        Vars.SystemComponents[a].DNN.ElementSymbolUsed = filteredSymbols;
+
         Vars.SystemComponents[a].DNN.Match_Element_PseudoAtom_with_model(Vars.SystemComponents[a].PseudoAtoms);
 
         Vars.SystemComponents[a].DNN.UCAtoms.resize(Vars.SystemComponents[a].NComponents.x);

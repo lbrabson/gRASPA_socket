@@ -13,6 +13,7 @@ SOCKET_NAME="ase_ipi_socket"
 SPECIES_FILE="socket_species.txt"
 
 SOCKET_PATH="/tmp/${SOCKET_NAME}"
+export GRASPA_SOCKET_PATH="${SOCKET_PATH}"
 
 # Clean up from previous runs
 rm -f "${SOCKET_PATH}" "${SPECIES_FILE}"

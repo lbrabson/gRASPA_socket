@@ -41,8 +41,7 @@ DNNMethod Socket
 DNNEnergyUnits eV
 MaxDNNDrift 100000000
 
-Component 0 MoleculeName             CO2
-            TURN_OFF_CBMC_SWAP       yes
+Component 0 MoleculeName             TIP4P
             IdealGasRosenbluthWeight 1.0
             FugacityCoefficient      PR-EOS
             TranslationProbability   1.0
@@ -50,5 +49,3 @@ Component 0 MoleculeName             CO2
             ReinsertionProbability   1.0
             SwapProbability          1.0
             CreateNumberOfMolecules  0
-
-
