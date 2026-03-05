@@ -1,12 +1,18 @@
-#!/usr/bin/env bash
-# gcmc_mace.bash — Launch gRASPA with MACE ML-potential server
-#
-# Usage:  bash gcmc_mace.bash [model_path]
-#
-# The server polls for socket_species.txt (written by gRASPA during init)
-# before opening its listener, so no race condition.
+#!/bin/sh
+###################################################
+#SBATCH -Jgcmc
+#SBATCH -A gts-amedford6-paid
+#SBATCH -t5:00:00
+#SBATCH --nodes=1 --gres=gpu:A100:1
+#SBATCH --mem-per-gpu=80G
+#SBATCH -qinferno
+#SBATCH -ogcmc_mace_cuEq.out
+###################################################
 
-set -euo pipefail
+module purge
+module load anaconda3
+module load nvhpc
+conda activate mlipmc_mace
 
 MODEL="${1:-/storage/home/hcoda1/8/lbrabson3/r-amedford6-0/mace-mpa-0-medium.model}"
 SOCKET_NAME="ase_ipi_socket"
@@ -23,7 +29,7 @@ python ase_ipi_server_mace.py \
     --socket "${SOCKET_NAME}" \
     --model "${MODEL}" \
     --species-file "${SPECIES_FILE}" \
-    --device cuda &
+    --device cuda &> server.log & \
 SERVER_PID=$!
 
 # Wait until the server has created the socket file before launching gRASPA.

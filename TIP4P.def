@@ -1,0 +1,25 @@
+# critical constants: Temperature [T], Pressure [Pa], and Acentric factor [-]
+647.3
+22120000.0
+0.344
+# Number Of Atoms
+4
+# Number Of Groups
+1
+# Alkane-group
+rigid
+# number of atoms
+4
+# atomic positions
+0   O_TIP4P    0.000000    0.203045    0.000000
+1   H_TIP4P    0.894246    0.156832   -0.338259
+2   H_TIP4P   -0.342067    1.030573   -0.338259
+3   L_TIP4P    0.058904    0.286393   -0.072168
+# Chiral centers Bond  BondDipoles Bend  UrayBradley InvBend  Torsion Imp. Torsion Bond/Bond Stretch/Bend Bend/Bend Stretch/Torsion Bend/Torsion IntraVDW IntraCoulomb
+               0    3            0    0            0       0        0            0         0            0         0               0            0        0            0
+# Bond stretch: atom n1-n2, type, parameters
+0 1 RIGID_BOND
+0 2 RIGID_BOND
+0 3 RIGID_BOND
+# Number of config moves
+0
