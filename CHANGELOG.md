@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-03-04 — Auto-generate socket name; propagate via `GRASPA_SOCKET_PATH`
+
+**Summary:** The UNIX socket path is now auto-generated per run, eliminating manual
+coordination between the Python server and gRASPA, and preventing collisions when
+multiple jobs run concurrently on the same node.
+
+**Problem:** The socket name was hardcoded as `ase_ipi_socket` in all launch scripts.
+Concurrent SLURM jobs on the same node would share `/tmp/ase_ipi_socket`, causing
+cross-job interference. Users also had to manually keep the name in sync between the
+bash script and any documentation.
+
+**Solution:** The bash script generates a unique name (`graspa_<6hex>`) via a Python
+one-liner, exports it as `GRASPA_SOCKET_PATH`, passes it to the server via `--socket`,
+and gRASPA's C++ client reads it from the environment. No manual coordination needed.
+
+**Files changed:**
+
+- `ase_ipi_server_mace.py` — `--socket` default changed from `"ase_ipi_socket"` to
+  `None`; `parser.error()` guard added so omitting `--socket` gives a clear message.
+
+- `runs/profiles/run_05/gcmc_mace.bash` — replaced `SOCKET_NAME="ase_ipi_socket"` with
+  an inline Python one-liner:
+  ```bash
+  SOCKET_NAME=$(python3 -c "import random, string; print('graspa_' + ''.join(random.choices(string.hexdigits.lower(), k=6)))")
+  SOCKET_PATH="/tmp/${SOCKET_NAME}"
+  export GRASPA_SOCKET_PATH="${SOCKET_PATH}"
+  ```
+  Removed `--species-file` from the server invocation (already deprecated/ignored).
+  Removed `SPECIES_FILE` from cleanup `rm -f`.
+
+**Note:** `src_clean/ase_energy_client.h` already reads `GRASPA_SOCKET_PATH` — no C++
+changes required. The inline one-liner is used instead of importing `generate_random_socket_name()`
+directly because the module may not be on the Python path when bash runs from the run
+subdirectory.
+
+---
+
 ## 2026-02-27 — Fix: DNNDrift rejection blocking all N-body socket moves
 
 **Summary:** Guarded the DNNDrift rejection check with `!SystemComponents.UseSocket`

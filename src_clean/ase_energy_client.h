@@ -41,7 +41,14 @@ struct Socket
     std::vector<std::string> ElementSymbolUsed;
     std::vector<int>Match_Element_PseudoAtom_order; //length = # of PseudoAtoms, value stored = order in the Socket//
 
-    char socket_path[108] = "/tmp/ase_ipi_socket";  // UNIX path limit
+    
+    char socket_path[108];  
+    Socket() {
+        const char* env_path = std::getenv("GRASPA_SOCKET_PATH");
+        std::strncpy(socket_path, env_path ? env_path : "/tmp/ase_ipi_socket", 107);
+        socket_path[107] = '\0';
+    }
+
     int    fd     = -1;   // UNIX socket file descriptor
     size_t natoms = 0;    // number of atoms sent in last call
 

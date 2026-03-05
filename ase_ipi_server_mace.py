@@ -34,10 +34,16 @@ import socket
 import struct
 import sys
 import time
+import random
+import string
 
 import numpy as np
 from ase import Atoms
 
+def generate_random_socket_name(prefix="graspa_", length=6):
+    """Generate a random socket name with the given prefix and a specified length of random hex characters."""
+    random_chars = "".join(random.choices(string.hexdigits.lower(), k=length))
+    return prefix + random_chars
 
 # ---------------------------------------------------------------------------
 # Calculator factory — edit this function to swap models
@@ -496,8 +502,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="N-body iPI server for gRASPA + ML potentials"
     )
-    parser.add_argument("--socket", "-s", default="ase_ipi_socket",
-                        help="UNIX socket name (creates /tmp/<name>)")
+    parser.add_argument("--socket", "-s", default=None,
+                        help="UNIX socket name (creates /tmp/<name>); "
+                             "if omitted, caller should pre-generate via "
+                             "generate_random_socket_name()")
     parser.add_argument("--model", "-m", required=True,
                         help="Path to MACE model file (.pt)")
     parser.add_argument("--device", "-d", default="cpu",
@@ -511,6 +519,9 @@ def main():
     parser.add_argument("--profile-output", default="./runs/profiles/server_profile.json",
                         help="Path to write JSON timing profile (default: ./runs/profiles/server_profile.json)")
     args = parser.parse_args()
+
+    if args.socket is None:
+        parser.error("--socket is required (use generate_random_socket_name() in the launch script)")
 
     # Force line-buffered stdout so prints appear immediately even when
     # stdout is redirected to a file or pipe (default is block-buffered).
