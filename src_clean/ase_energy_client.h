@@ -41,14 +41,13 @@ struct Socket
     std::vector<std::string> ElementSymbolUsed;
     std::vector<int>Match_Element_PseudoAtom_order; //length = # of PseudoAtoms, value stored = order in the Socket//
 
-    
     char socket_path[108];  
     Socket() {
         const char* env_path = std::getenv("GRASPA_SOCKET_PATH");
         std::strncpy(socket_path, env_path ? env_path : "/tmp/ase_ipi_socket", 107);
         socket_path[107] = '\0';
     }
-
+    
     int    fd     = -1;   // UNIX socket file descriptor
     size_t natoms = 0;    // number of atoms sent in last call
 
@@ -162,7 +161,7 @@ struct Socket
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
-        printf("Connecting to CHGNet server at: %s\n", socket_path);
+        printf("Connecting to MLIP server at: %s\n", socket_path);
 
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             perror("connect");
@@ -191,6 +190,14 @@ struct Socket
     void PrimeFrameworkCache()
     {
         size_t n_fw = UCAtoms[0].size;
+
+        printf("[PrimeFW] n_fw=%zu\n", n_fw);
+        printf("[PrimeFW] cell diag: %f %f %f\n", UCBox.Cell[0], UCBox.Cell[4], UCBox.Cell[8]);
+        printf("[PrimeFW] first atom xyz: %f %f %f type=%zu\n",
+            UCAtoms[0].pos[0].x, UCAtoms[0].pos[0].y, UCAtoms[0].pos[0].z,
+            UCAtoms[0].Type[0]);
+        fflush(stdout);
+
         std::vector<double>  xyz_fw(3 * n_fw);
         std::vector<int32_t> types_fw(n_fw);
         for (size_t i = 0; i < n_fw; i++) {
@@ -198,7 +205,10 @@ struct Socket
             xyz_fw[3*i+1] = UCAtoms[0].pos[i].y;
             xyz_fw[3*i+2] = UCAtoms[0].pos[i].z;
             types_fw[i]   = (int32_t)UCAtoms[0].Type[i];
+            // printf("[PrimeFW] atom %zu: xyz %f %f %f type=%d\n",
+            //     i, xyz_fw[3*i], xyz_fw[3*i+1], xyz_fw[3*i+2], types_fw[i]);
         }
+
         double E_fw_ev = PredictFromSocket(
             xyz_fw.data(), types_fw.data(), n_fw,
             (int32_t)CONFIG_FRAMEWORK, 0);
@@ -423,9 +433,9 @@ struct Socket
             }
         }
 
-        printf("[CLIENT_EXT] config_type=%d mol_idx=%d n_mol=%d natoms=%zu\n",
-               (int)config_type, (int)mol_idx, (int)n_mol, n_atoms);
-        fflush(stdout);
+        // printf("[CLIENT_EXT] config_type=%d mol_idx=%d n_mol=%d natoms=%zu\n",
+        //        (int)config_type, (int)mol_idx, (int)n_mol, n_atoms);
+        // fflush(stdout);
 
         send_positions_extended(xyz, types, n_atoms, config_type, n_mol, mol_idx);
 
@@ -691,13 +701,18 @@ struct Socket
         Match_Element_PseudoAtom_order.resize(PseudoAtoms.Symbol.size(), -1);
         for(size_t i = 0; i < PseudoAtoms.Symbol.size(); i++)
         {
-        for(size_t j = 0; j < ElementSymbolUsed.size(); j++)
-            if(PseudoAtoms.Symbol[i] == ElementSymbolUsed[j])
+            if(PseudoAtoms.mass[i] <= 0.0)
             {
-            Match_Element_PseudoAtom_order[i] = j;
-            printf("PseudoAtom Symbol[%zu]: %s, Socket Symbol[%zu]: %s, MATCHED\n", i, PseudoAtoms.Symbol[i].c_str(), j, ElementSymbolUsed[j].c_str());
-            break;
+                printf("PseudoAtom Symbol[%zu]: %s — massless, skipping\n", i, PseudoAtoms.Symbol[i].c_str());
+                continue;
             }
+            for(size_t j = 0; j < ElementSymbolUsed.size(); j++)
+                if(PseudoAtoms.Symbol[i] == ElementSymbolUsed[j])
+                {
+                    Match_Element_PseudoAtom_order[i] = j;
+                    printf("PseudoAtom Symbol[%zu]: %s, Socket Symbol[%zu]: %s, MATCHED\n", i, PseudoAtoms.Symbol[i].c_str(), j, ElementSymbolUsed[j].c_str());
+                    break;
+                }
         }
     }
 

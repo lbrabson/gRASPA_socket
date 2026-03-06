@@ -265,6 +265,9 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
         if natoms > 0:
             types_raw = _recvall(conn, 4 * natoms)
             types_arr = struct.unpack(f"!{natoms}i", types_raw)
+            print(f"[SERVER] types_arr sample: {types_arr[:10]}")
+            print(f"[SERVER] species_map keys: {list(species_map.keys())}")
+            sys.stdout.flush()
             positions = recv_doubles(conn, 3 * natoms).reshape(natoms, 3)
             symbols   = [species_map[t] for t in types_arr]
         else:
@@ -290,6 +293,7 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
             atoms_fw.calc = calc
             _t_build = time.perf_counter() - _tb
             _tm = time.perf_counter()
+            print(atoms_fw)
             cached_E_fw   = atoms_fw.get_potential_energy()
             _t_mace_full = time.perf_counter() - _tm
             E_current     = cached_E_fw   # zero adsorbates → E_current = E_fw
@@ -458,8 +462,8 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
             print(f"  Unknown config_type={config_type} — returning 0")
 
         step += 1
-        print(f"  step {step:5d}  {label}  config_type={config_type:4d}  "
-              f"natoms={natoms:5d}  n_mol={n_mol}  E={energy:14.6f} eV")
+        # print(f"  step {step:5d}  {label}  config_type={config_type:4d}  "
+        #      f"natoms={natoms:5d}  n_mol={n_mol}  E={energy:14.6f} eV")
 
         # ---- iPI FORCEREADY response ----
         _t_send_start = time.perf_counter()

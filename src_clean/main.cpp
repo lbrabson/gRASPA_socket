@@ -315,9 +315,13 @@ Variables Initialize(void) //for pybind
       }
       else
       {
-        // No DNNPseudoAtoms keyword — default: pass all adsorbate atoms to the model
+        // No DNNPseudoAtoms keyword — pass all atoms but skip massless sites (e.g. TIP4P M-site)
         for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
-          ConsiderThisAdsorbateAtom[y] = true;
+        {
+          int pseudoAtomType = Vars.SystemComponents[a].HostSystem[1].Type[y];
+          double mass = Vars.SystemComponents[a].PseudoAtoms.mass[pseudoAtomType];
+          ConsiderThisAdsorbateAtom[y] = (mass > 0.0);
+        }
       }
       //Declare a new, cuda managed mem (accessible on both CPU/GPU) to overwrite the original  bool mem
       cudaMallocManaged(&Vars.SystemComponents[a].ConsiderThisAdsorbateAtom, sizeof(bool) * Vars.SystemComponents[a].Moleculesize[1]);

@@ -1,0 +1,261 @@
+---------------------------------------
+Begin Slurm Prolog: Mar-05-2026 13:19:45
+Job ID:    4635053
+User ID:   lbrabson3
+Account:   gts-amedford6-paid
+Job name:  gcmc
+Partition: gpu-a100
+QOS:       inferno
+---------------------------------------
+Starting MACE iPI server (model: /storage/home/hcoda1/8/lbrabson3/r-amedford6-0/mace-mpa-0-medium.model)...
+Waiting for server socket: /tmp/ase_ipi_socket ...
+Server socket ready after 15s.
+Starting gRASPA...
+/storage/project/r-amedford6-0/lbrabson3/gRASPA_dir/gRASPA_socket-manybody/patch_Socket/nvc_main.x------------------GENERAL SIMULATION SETUP-------------
+Finished Checking Number of Components, There are 1 framework, 1 Adsorbates, 2 total Components
+DNN Model Name: Socket
+DONE Reading Model Info from simulation.input file
+Setting Maximum Number of Steps for a Cycle, Max Step = 1
+-------------------------------------------------------
+device_random[0] = 2.30000 4.50000 6.70000
+================FUGACITY COEFFICIENT CALCULATION================
+Checking: Current Fugacity Coeff for 1 component: -1.00000
+Component 1 needs PR-EOS for fugacity coeff (negative value), going to ignore the fugacity coefficient for other components and calculate all using PR-EOS!start calculating fugacity, Pressure: 113276.10400, Temperature: 298.00000
+Component 1, Pc: 22120000.00000, Tc: 647.30000, Ac: 0.34400
+Component Mol Fraction: 1.00000
+kappa: 0.87324, alpha: 1.64029
+==========================================
+====== Preparing Simulation box 0 ======
+==========================================
+Parsing [1] Component
+-------------- READING AdsorbateComponent 0 (TIP4P) --------------
+==================================================
+ACCUMULATED Probabilities:
+Translation Probability:      0.25000
+Rotation Probability:         0.50000
+Special Rotation Probability: 0.50000
+Widom Probability:            0.50000
+Reinsertion Probability:      0.75000
+Identity Swap Probability:    0.75000
+CBCF Swap Probability:        0.75000
+Swap Probability:             1.00000
+Volume Probability:           1.00000
+Gibbs Swap Probability:       1.00000
+Gibbs Volume Probability:     1.00000
+Sum of Probabilities:         1.00000
+==================================================
+-------------- END OF READING Component 0 (TIP4P) --------------
+1
+Number of Solutions: 3
+TempComponents.AmountOfExcessMolecules for component 0 is 0.0000000000; Compressibility: 0.0009682936
+Fugacity Coefficient for component 1 is 0.0234512027
+Check: Computed FugaCoeff for 0, 0 is 0.9827583571
+Check: Computed FugaCoeff for 0, 1 is 8.4195330327
+Check: Computed FugaCoeff for 0, 2 is 0.0234512027
+================END OF FUGACITY COEFFICIENT CALCULATION================
+----------------- MEMORY ALLOCAION STATUS -----------------
+System allocate_sizes are: 1188, 10240
+Component allocate_sizes are: 1188, 10240
+Allocated Blocksum size: 19201, vdw_real size: 19201, fourier_size: 0
+------------------------------------------------------------
+------------------- SIMULATION BOX PARAMETERS -----------------
+Pressure:        0.00682
+Box Volume:      19903.43092
+Box Beta:        0.00404
+Box Temperature: 298.00000
+---------------------------------------------------------------
+Volume: 19903.43092, excess_volume: 0.00000, Pressure: 113276.10400
+Rosen capacity: 8
+Allocated 8 double3 for reinsertion!
+Atom 0, Consider? true
+Atom 1, Consider? true
+Atom 2, Consider? true
+Atom 3, Consider? false
+Setting up Socket model
+DONE Reading the model, model name Socket
+------- MATCHING ELEMENTS WITH PSEUDO ATOM ELEMENT SYMBOLS -------
+PseudoAtom Symbol[0]: H, Socket Symbol[0]: H, MATCHED
+PseudoAtom Symbol[1]: C, Socket Symbol[1]: C, MATCHED
+PseudoAtom Symbol[2]: O, Socket Symbol[2]: O, MATCHED
+PseudoAtom Symbol[3]: N, Socket Symbol[3]: N, MATCHED
+PseudoAtom Symbol[4]: Zn, Socket Symbol[4]: Zn, MATCHED
+PseudoAtom Symbol[5]: C, Socket Symbol[1]: C, MATCHED
+PseudoAtom Symbol[6]: O, Socket Symbol[2]: O, MATCHED
+PseudoAtom Symbol[7]: H, Socket Symbol[0]: H, MATCHED
+PseudoAtom Symbol[8]: M — massless, skipping
+PseudoAtom Symbol[9]: O, Socket Symbol[2]: O, MATCHED
+UCBox cell matrix (Angstrom):
+  [    26.741401      0.000000      0.000000 ]
+  [     0.000000     29.080499      0.000000 ]
+  [   -12.425125      0.000000     25.594223 ]
+Generated UC Box
+Component 0, Atom 0, xyz -0.259526 0.547197 3.740148, Type 4, SymbolIndex 4
+Component 0, Atom 1, xyz 5.031612 9.146302 4.791261, Type 4, SymbolIndex 4
+Component 0, Atom 2, xyz 7.102470 5.393946 0.525558, Type 4, SymbolIndex 4
+Component 0, Atom 3, xyz -2.330377 4.299550 8.005849, Type 4, SymbolIndex 4
+Component 0, Atom 4, xyz -1.238244 8.599657 3.148501, Type 3, SymbolIndex 3
+Component 0, Atom 1184, xyz 14.671868 26.073647 19.871662, Type 0, SymbolIndex 0
+Component 0, Atom 1185, xyz 9.188588 22.393849 22.785376, Type 0, SymbolIndex 0
+Component 0, Atom 1186, xyz 11.259443 21.226899 18.519672, Type 0, SymbolIndex 0
+Component 0, Atom 1187, xyz 12.601015 27.240599 24.137366, Type 0, SymbolIndex 0
+Component 1, Atom 0, xyz 0.000000 0.203045 0.000000, Type 9, SymbolIndex 2
+Component 1, Atom 1, xyz 0.894246 0.156832 -0.338259, Type 7, SymbolIndex 0
+Component 1, Atom 2, xyz -0.342067 1.030573 -0.338259, Type 7, SymbolIndex 0
+DONE Copying Framework + template adsorbate atom into UCAtoms for Socket
+DONE Setting Test Adsorbate positions
+Connecting to MLIP server at: /tmp/ase_ipi_socket
+Connected successfully
+i-PI handshake complete
+Sent species map: 5 species, n_fw=1188
+[PrimeFW] n_fw=1188
+[PrimeFW] cell diag: 26.741401 29.080499 25.594223
+[PrimeFW] first atom xyz: -0.259526 0.547197 3.740148 type=4
+[CLIENT] POSDATA natoms=1188 config_type=0 n_mol=0
+  atom 0: -0.25953 0.54720 3.74015 type=4
+  atom 1: 5.03161 9.14630 4.79126 type=4
+  atom 2: 7.10247 5.39395 0.52556 type=4
+  atom 3: -2.33038 4.29955 8.00585 type=4
+  atom 4: -1.23824 8.59966 3.14850 type=3
+======================== CALCULATING INITIAL STAGE ENERGY ========================
+****** Calculating VDW + Real Energy (CPU) ******
+Host-Host   VDW: 0.00000; Real: 0.00000
+Host-Guest  VDW: 0.00000; Real: 0.00000
+Guest-Guest VDW: 0.00000; Real: 0.00000
+********** PRINTING COMPONENT ENERGIES**********
+Compoent [0-0], VDW: 0.00000, Real: 0.00000
+Compoent [0-1], VDW: 0.00000, Real: 0.00000
+Compoent [1-1], VDW: 0.00000, Real: 0.00000
+****** Calculating Ewald Energy (CPU) ******
+CPU Guest-Guest Fourier: 0.00000, Host-Host Fourier: 7037.08874, Framework-Guest Fourier: 0.00000
+Component: 0, SelfAtomE: 3036079.51635 (3651566.56459 kJ/mol)
+Component: 1, SelfAtomE: 0.00000 (0.00000 kJ/mol)
+Component: 0, Intra-Molecular ExclusionE: 3068090.83192 (3690067.35122 kJ/mol)
+Component: 1, Intra-Molecular ExclusionE: 0.00000 (0.00000 kJ/mol)
+HostEwald took 0.08392 sec
+Ewald Summation (total energy) on the CPU took 0.08392 secs
+Component 0, Intra Exclusion Energy: -3068090.83192 (-3690067.35122 kJ/mol)
+Component 0, Atom Self Exclusion Energy: 3036079.51635 (3651566.56459 kJ/mol)
+DEBUG: comp: 0, IntraE: -3068090.83192, SelfE: 3036079.51635
+Component 1, Intra Exclusion Energy: -31822.39472 (-38273.56693 kJ/mol)
+Component 1, Atom Self Exclusion Energy: 32018.52747 (38509.46055 kJ/mol)
+DEBUG: comp: 1, IntraE: -31822.39472, SelfE: 32018.52747
+******   Allocating Ewald WaveVectors + StructureFactors (INITIAL STAGE ONLY)   ******
+Allocated 38016 42768 38016 space for eikxyz
+Structure Factor 0 is 0.00000 0.00000
+Structure Factor 1 is 0.00000 0.00000
+Structure Factor 2 is 0.00000 0.00000
+Structure Factor 3 is 0.00000 0.00000
+Structure Factor 4 is 0.00000 0.00000
+Structure Factor 5 is 0.00000 0.00000
+Structure Factor 6 is 0.00000 0.00000
+Structure Factor 7 is 0.00000 0.00000
+Structure Factor 8 is 0.00000 0.00000
+Structure Factor 9 is 0.00000 0.00000
+****** DONE Allocating Ewald WaveVectors + StructureFactors(INITIAL STAGE ONLY) ******
+ ****** CHECKING StructureFactors (SF) Stored on CPU vs. GPU ****** 
+CPU SF: 2040, GPU SF: 2040
+StructureFactor 0, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 1, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 2, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 3, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 4, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 5, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 6, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 7, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 8, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 9, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+ ****** CHECKING Framework StructureFactors Stored on CPU ****** 
+Framework Structure Factor 0, real: 0.00000 imag: 0.00000
+Framework Structure Factor 1, real: 0.00000 imag: 0.00000
+Framework Structure Factor 2, real: 0.00000 imag: 0.00000
+Framework Structure Factor 3, real: 0.00000 imag: 0.00000
+Framework Structure Factor 4, real: 0.00000 imag: 0.00000
+Framework Structure Factor 5, real: 0.00000 imag: 0.00000
+Framework Structure Factor 6, real: 0.00000 imag: -0.00000
+Framework Structure Factor 7, real: 0.00000 imag: 0.00000
+Framework Structure Factor 8, real: -0.00000 imag: 0.00000
+Framework Structure Factor 9, real: 0.00000 imag: 0.00000
+VDW + Real on the GPU took 0.00000 secs
+Ewald Summation (total energy) on the GPU took 0.00043 secs
+Total GPU Energy: 
+====================== DONE CALCULATING INITIAL STAGE ENERGY ======================
+Component 1, Need to create 0 full molecule
+======================== CALCULATING CREATE_MOLECULE STAGE ENERGY ========================
+****** Calculating VDW + Real Energy (CPU) ******
+Host-Host   VDW: 0.00000; Real: 0.00000
+Host-Guest  VDW: 0.00000; Real: 0.00000
+Guest-Guest VDW: 0.00000; Real: 0.00000
+********** PRINTING COMPONENT ENERGIES**********
+Compoent [0-0], VDW: 0.00000, Real: 0.00000
+Compoent [0-1], VDW: 0.00000, Real: 0.00000
+Compoent [1-1], VDW: 0.00000, Real: 0.00000
+****** Calculating Ewald Energy (CPU) ******
+CPU Guest-Guest Fourier: 0.00000, Host-Host Fourier: 7037.08874, Framework-Guest Fourier: 0.00000
+Component: 0, SelfAtomE: 3036079.51635 (3651566.56459 kJ/mol)
+Component: 1, SelfAtomE: 0.00000 (0.00000 kJ/mol)
+Component: 0, Intra-Molecular ExclusionE: 3068090.83192 (3690067.35122 kJ/mol)
+Component: 1, Intra-Molecular ExclusionE: 0.00000 (0.00000 kJ/mol)
+HostEwald took 0.08416 sec
+Ewald Summation (total energy) on the CPU took 0.08417 secs
+ ****** CHECKING StructureFactors (SF) Stored on CPU vs. GPU ****** 
+CPU SF: 2040, GPU SF: 2040
+StructureFactor 0, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 1, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 2, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 3, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 4, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 5, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 6, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 7, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 8, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 9, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+ ****** CHECKING Framework StructureFactors Stored on CPU ****** 
+Framework Structure Factor 0, real: 0.00000 imag: 0.00000
+Framework Structure Factor 1, real: 0.00000 imag: 0.00000
+Framework Structure Factor 2, real: 0.00000 imag: 0.00000
+Framework Structure Factor 3, real: 0.00000 imag: 0.00000
+Framework Structure Factor 4, real: 0.00000 imag: 0.00000
+Framework Structure Factor 5, real: 0.00000 imag: 0.00000
+Framework Structure Factor 6, real: 0.00000 imag: -0.00000
+Framework Structure Factor 7, real: 0.00000 imag: 0.00000
+Framework Structure Factor 8, real: -0.00000 imag: 0.00000
+Framework Structure Factor 9, real: 0.00000 imag: 0.00000
+VDW + Real on the GPU took 0.00000 secs
+Ewald Summation (total energy) on the GPU took 0.00027 secs
+Total GPU Energy: 
+====================== DONE CALCULATING CREATE_MOLECULE STAGE ENERGY ======================
+Running Simulation Boxes in SERIAL, currently [0] box; pres: 113276.10400 [Pa], temp: 298.00000 [K]
+==================================
+== RUNNING INITIALIZATION PHASE ==
+==================================
+CBMC Uses 8 trial positions and 8 trial orientations
+Box 0, Volume: 19903.43092
+Total Volume: 19903.43092
+INITIALIZATION Cycle: 0, 0 Adsorbate Molecules, Total Energy: 0.00000  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 0 Molecules  ||  
+INITIALIZATION Cycle: 200, 22 Adsorbate Molecules, Total Energy: -137483.22990  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 22 Molecules  ||  
+INITIALIZATION Cycle: 400, 34 Adsorbate Molecules, Total Energy: -210307.75773  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 34 Molecules  ||  
+INITIALIZATION Cycle: 600, 46 Adsorbate Molecules, Total Energy: -279560.93974  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 46 Molecules  ||  
+INITIALIZATION Cycle: 800, 50 Adsorbate Molecules, Total Energy: -306209.83752  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 50 Molecules  ||  
+INITIALIZATION Cycle: 1000, 52 Adsorbate Molecules, Total Energy: -331423.74045  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 52 Molecules  ||  
+INITIALIZATION Cycle: 1200, 57 Adsorbate Molecules, Total Energy: -357696.69716  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 57 Molecules  ||  
+INITIALIZATION Cycle: 1400, 60 Adsorbate Molecules, Total Energy: -379548.32425  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 60 Molecules  ||  
+INITIALIZATION Cycle: 1600, 66 Adsorbate Molecules, Total Energy: -409534.81972  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 66 Molecules  ||  
+INITIALIZATION Cycle: 1800, 68 Adsorbate Molecules, Total Energy: -420891.80709  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 68 Molecules  ||  
+INITIALIZATION Cycle: 2000, 73 Adsorbate Molecules, Total Energy: -447290.40531  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 73 Molecules  ||  
+INITIALIZATION Cycle: 2200, 76 Adsorbate Molecules, Total Energy: -461428.93030  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 76 Molecules  ||  
+INITIALIZATION Cycle: 2400, 79 Adsorbate Molecules, Total Energy: -480085.53190  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 79 Molecules  ||  
+INITIALIZATION Cycle: 2600, 79 Adsorbate Molecules, Total Energy: -482392.71411  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 79 Molecules  ||  
+INITIALIZATION Cycle: 2800, 80 Adsorbate Molecules, Total Energy: -486099.75804  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [TIP4P], 80 Molecules  ||  
+[2026-03-05T13:35:28.683] error: *** JOB 4635053 ON atl1-1-01-006-7-0 CANCELLED AT 2026-03-05T13:35:28 DUE to SIGNAL Terminated ***
+---------------------------------------
+Begin Slurm Epilog: Mar-05-2026 13:35:31
+Job ID:        4635053
+User ID:       lbrabson3
+Account:       gts-amedford6-paid
+Job name:      gcmc
+Resources:     cpu=8,gres/gpu:a100=1,mem=80G,node=1
+Rsrc Used:     cput=02:05:44,vmem=0,walltime=00:15:43,mem=2281792K,energy_used=0
+Partition:     gpu-a100
+QOS:           inferno
+Nodes:         atl1-1-01-006-7-0
+---------------------------------------
