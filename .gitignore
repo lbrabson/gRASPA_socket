@@ -11,3 +11,7 @@ build/
 
 # patched src folder
 patch_Socket/
+gRASPA_files_for_Lucas/
+gRASPA_files_for_Lucas.zip
+runs/
+.claude/

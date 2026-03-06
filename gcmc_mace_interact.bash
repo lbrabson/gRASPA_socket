@@ -1,18 +1,7 @@
 #!/bin/sh
-###################################################
-#SBATCH -Jgcmc_socket_test
-#SBATCH -A gts-amedford6-paid
-#SBATCH -t16:00:00
-#SBATCH --nodes=1 --gres=gpu:rtx_pro_6000_blackwell:1
-#SBATCH --mem-per-gpu=96G
-# #SBATCH -q embers
-#SBATCH -osocket_test.out
-###################################################
-
-cd $SLURM_SUBMIT_DIR
 
 module purge
-source ~/.bashrc 
+source ~/.bashrc
 
 ml cuda
 ml nvhpc
@@ -28,7 +17,7 @@ mamba activate range-mace
 set -euo pipefail
 
 MODEL="${1:-/storage/home/hcoda1/9/ltimmerman3/r-amedford6-0/potentials/MACE/mace-mpa-0-medium.model}"
-# Generate a unique socket name (inline — avoids module import path issues)
+# Generate a unique socket name using the Python function (instant one-liner)
 SOCKET_NAME=$(python3 -c "import random, string; print('graspa_' + ''.join(random.choices(string.hexdigits.lower(), k=6)))")
 SOCKET_PATH="/tmp/${SOCKET_NAME}"
 export GRASPA_SOCKET_PATH="${SOCKET_PATH}"

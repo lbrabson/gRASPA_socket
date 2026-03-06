@@ -96,7 +96,7 @@ The `socket-patch/Socket/PATCH_SOCKET_*.txt` files contain just the snippet code
 |  - Receives energy (eV), converts to 10J/mol    |
 +------------------+-------------------------------+
                    |  UNIX Domain Socket
-                   |  /tmp/ase_ipi_socket
+                   |  /tmp/graspa_<6hex>  (auto-generated per run)
                    v
 +--------------------------------------------------+
 |  Python Server (ase_ipi_server_mace.py)          |
@@ -112,7 +112,7 @@ The `socket-patch/Socket/PATCH_SOCKET_*.txt` files contain just the snippet code
 
 ### Transport
 - **Socket type:** UNIX Domain (`AF_UNIX`, `SOCK_STREAM`) or INET TCP
-- **Default path:** `/tmp/ase_ipi_socket` (hardcoded in `Socket` struct)
+- **Path:** read from `GRASPA_SOCKET_PATH` env var (set by launch script); format `/tmp/graspa_<6hex>`
 - **Max path length:** 108 bytes
 
 ### Message Format
@@ -247,7 +247,7 @@ struct Socket {
     std::vector<int> Match_Element_PseudoAtom_order;
 
     // Connection state
-    char socket_path[108] = "/tmp/ase_ipi_socket";
+    char socket_path[108];  // set from GRASPA_SOCKET_PATH env var at connect time
     int fd = -1;                                // File descriptor
     size_t natoms = 0;
     size_t DNN_Molsize = 0;                     // Atoms per adsorbate (excluding fictional)
@@ -443,7 +443,11 @@ DNNModelName          Socket      # identifier (not a file path for socket mode)
 
 ### Socket Path
 
-Hardcoded to `/tmp/ase_ipi_socket` in the `Socket` struct default. The Python server uses `/tmp/<socket_name>` where `<socket_name>` is passed via `--socket` flag. **These must match.** Pass `--socket ase_ipi_socket` to the server to use the default path.
+The C++ client reads the socket path from the environment variable `GRASPA_SOCKET_PATH`
+at startup (set by the launch script). The Python server creates `/tmp/<socket_name>`
+where `<socket_name>` is passed via `--socket`. The launch script auto-generates a unique
+name and exports `GRASPA_SOCKET_PATH` so both sides agree without manual coordination.
+See [Section 11 — Python Server](#python-server) for the canonical launch pattern.
 
 ---
 
@@ -554,16 +558,18 @@ first socket call. Previously this wrap happened implicitly inside
 
 ```bash
 python ase_ipi_server_mace.py \
-    --socket ase_ipi_socket \
+    --socket "${SOCKET_NAME}" \
     --model /path/to/model.pt \
     --profile-output ./runs/profiles/server_profile.json
 ```
+
+`--socket` is required; use the auto-generated name from the launch script (see Section 11).
 
 - Loads a MACE ML potential (or other ASE-compatible calculator)
 - Implements the iPI wire protocol directly (not via ASE's SocketIOCalculator)
 - Routes configurations by `config_type` (unambiguous; see Section 4)
 - Supports CUDA GPU or CPU (`--device`)
-- Socket path becomes `/tmp/ase_ipi_socket` (matching the C++ client default)
+- Socket path is `/tmp/<socket_name>` where `--socket` is required (no default)
 - `--profile-output`: path for per-phase JSON timing profile written at end of session
   (default: `./runs/profiles/server_profile.json`)
 
@@ -610,22 +616,34 @@ All routing (DELTA_QUERY, COMMIT_*, SYNC_FULL, QUERY_TOTAL) is handled inline in
 
 ### Typical Launch Script (`gcmc_mace.bash`)
 
+The socket name is auto-generated per run so concurrent jobs on the same node don't
+collide. The name is generated in bash (using an inline Python one-liner that replicates
+`generate_random_socket_name()`) and exported as `GRASPA_SOCKET_PATH` before gRASPA
+starts. gRASPA's C++ client picks it up from the environment.
+
 ```bash
-SOCKET_NAME="ase_ipi_socket"
+# Generate a unique socket name (inline — avoids module import path issues)
+SOCKET_NAME=$(python3 -c "import random, string; print('graspa_' + ''.join(random.choices(string.hexdigits.lower(), k=6)))")
 SOCKET_PATH="/tmp/${SOCKET_NAME}"
+export GRASPA_SOCKET_PATH="${SOCKET_PATH}"
+
+echo "Socket: ${SOCKET_PATH}"
 
 rm -f "${SOCKET_PATH}"                                # Clean old socket
 python ase_ipi_server_mace.py \
     --socket "${SOCKET_NAME}" \
-    --model /path/to/model.pt &                       # Start server
+    --model /path/to/model.pt &                       # Start server (--socket is required)
 
 # Wait for model to load (socket appears only after torch.load completes)
 until [ -S "${SOCKET_PATH}" ]; do sleep 1; done
 
-./nvc_main.x                                          # Start gRASPA
+./nvc_main.x                                          # Start gRASPA (inherits GRASPA_SOCKET_PATH)
 kill %1                                               # Stop server
 rm -f "${SOCKET_PATH}"                                # Cleanup
 ```
+
+To override the auto-generated name (e.g. for debugging), simply set `SOCKET_NAME`
+manually before the export line.
 
 ---
 
@@ -634,7 +652,7 @@ rm -f "${SOCKET_PATH}"                                # Cleanup
 ```
 Server side:
   S1. Load ML model
-  S2. Bind + listen on /tmp/ase_ipi_socket
+  S2. Bind + listen on /tmp/graspa_<6hex>  (path given via --socket)
   S3. Accept connection (blocks until gRASPA connects at step C7)
   S4. do_handshake() — STATUS → NEEDINIT → INIT
   S5. recv_species_map() — species info arrives over wire
