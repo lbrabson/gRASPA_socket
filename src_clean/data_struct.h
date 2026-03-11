@@ -478,7 +478,7 @@ struct MoveEnergy
     storedHGEwaldE  = HGEwaldE;
     HGVDW = 0.0;
     HGReal= 0.0;
-    HGEwaldE = 0.0;
+    HGEwaldE = 0.0; // do not use classical Ewald for long-range electrostatics
   }
   double DNN_Correction() //Using DNN energy to replace HGVDW, HGReal and HGEwaldE//
   {
@@ -1096,6 +1096,7 @@ struct Components
   ///////////////////////////
   //General DNN Flags//
   bool UseDNNforHostGuest = false;
+  bool DebugMode = false;
   size_t TranslationRotationDNNReject=0;
   size_t ReinsertionDNNReject=0;
   size_t InsertionDNNReject=0;

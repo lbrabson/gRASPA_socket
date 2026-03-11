@@ -191,6 +191,7 @@ Variables Initialize(void) //for pybind
     /////////////////////////////////////
     //Zhao's note: different systems will share the SAME components (for adsorbate), only read it once//
       Vars.TempComponents.UseDNNforHostGuest = Comp_for_DNN_Model[a].UseDNNforHostGuest;
+      Vars.TempComponents.DebugMode          = Comp_for_DNN_Model[a].DebugMode;
       Vars.TempComponents.UseAllegro         = Comp_for_DNN_Model[a].UseAllegro;
       Vars.TempComponents.UseLCLin           = Comp_for_DNN_Model[a].UseLCLin;
       Vars.TempComponents.UseSocket          = Comp_for_DNN_Model[a].UseSocket;

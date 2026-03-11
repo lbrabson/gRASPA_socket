@@ -1,9 +1,9 @@
 UseGPUReduction no
 Useflag yes
 
-NumberOfInitializationCycles 20000
+NumberOfInitializationCycles 10000
 NumberOfEquilibrationCycles  0
-NumberOfProductionCycles     20000
+NumberOfProductionCycles     10000
 
 NumberOfTrialPositions  8
 NumberOfTrialOrientations   8
@@ -27,8 +27,9 @@ FrameworkName calf20_ddec_super
 UnitCells 0 1 1 1
 
 ChargeMethod Ewald
-Temperature 298
-Pressure 113276.104
+CutOffCoulomb 6
+Temperature 293
+Pressure 120000
 
 OverlapCriteria 1e5
 CutOffVDW 12.8
@@ -36,12 +37,13 @@ CutOffCoulomb 12.8
 EwaldPrecision 1e-6
 
 UseDNNforHostGuest yes
+DebugMode yes
 DNNModelName Socket
 DNNMethod Socket
-DNNEnergyUnits eV
-MaxDNNDrift 100000000
+DNNEnergyUnit eV
+MaxDNNDrift 1000000000000
 
-Component 0 MoleculeName             TIP4P
+Component 0 MoleculeName             CO2
             IdealGasRosenbluthWeight 1.0
             FugacityCoefficient      PR-EOS
             TranslationProbability   1.0

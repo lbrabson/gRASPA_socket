@@ -1,0 +1,339 @@
+/storage/project/r-amedford6-0/lbrabson3/gRASPA_dir/gRASPA_socket-manybody-ewald/patch_Socket/nvc_main.x------------------GENERAL SIMULATION SETUP-------------
+Finished Checking Number of Components, There are 1 framework, 1 Adsorbates, 2 total Components
+DNN Model Name: Socket
+DONE Reading Model Info from simulation.input file
+Setting Maximum Number of Steps for a Cycle, Max Step = 1
+-------------------------------------------------------
+device_random[0] = 2.30000 4.50000 6.70000
+================FUGACITY COEFFICIENT CALCULATION================
+Checking: Current Fugacity Coeff for 1 component: -1.00000
+Component 1 needs PR-EOS for fugacity coeff (negative value), going to ignore the fugacity coefficient for other components and calculate all using PR-EOS!start calculating fugacity, Pressure: 120000.00000, Temperature: 293.00000
+Component 1, Pc: 7377300.00000, Tc: 304.12820, Ac: 0.22394
+Component Mol Fraction: 1.00000
+kappa: 0.70648, alpha: 1.02626
+==========================================
+====== Preparing Simulation box 0 ======
+==========================================
+Parsing [1] Component
+-------------- READING AdsorbateComponent 0 (CO2) --------------
+==================================================
+ACCUMULATED Probabilities:
+Translation Probability:      0.25000
+Rotation Probability:         0.50000
+Special Rotation Probability: 0.50000
+Widom Probability:            0.50000
+Reinsertion Probability:      0.75000
+Identity Swap Probability:    0.75000
+CBCF Swap Probability:        0.75000
+Swap Probability:             1.00000
+Volume Probability:           1.00000
+Gibbs Swap Probability:       1.00000
+Gibbs Volume Probability:     1.00000
+Sum of Probabilities:         1.00000
+==================================================
+-------------- END OF READING Component 0 (CO2) --------------
+1
+Number of Solutions: 1
+TempComponents.AmountOfExcessMolecules for component 0 is 0.0000000000; Compressibility: 0.9930652591
+Fugacity Coefficient for component 1 is 0.9931015386
+Check: Computed FugaCoeff for 0, 0 is 0.9931015386
+================END OF FUGACITY COEFFICIENT CALCULATION================
+----------------- MEMORY ALLOCAION STATUS -----------------
+System allocate_sizes are: 1188, 10240
+Component allocate_sizes are: 1188, 10240
+Allocated Blocksum size: 12801, vdw_real size: 12801, fourier_size: 0
+------------------------------------------------------------
+------------------- SIMULATION BOX PARAMETERS -----------------
+Pressure:        0.00723
+Box Volume:      19903.43092
+Box Beta:        0.00410
+Box Temperature: 293.00000
+---------------------------------------------------------------
+Volume: 19903.43092, excess_volume: 0.00000, Pressure: 120000.00000
+Rosen capacity: 8
+Allocated 6 double3 for reinsertion!
+Atom 0, Consider? true
+Atom 1, Consider? true
+Atom 2, Consider? true
+Setting up Socket model
+DONE Reading the model, model name Socket
+------- MATCHING ELEMENTS WITH PSEUDO ATOM ELEMENT SYMBOLS -------
+PseudoAtom Symbol[0]: H, Socket Symbol[0]: H, MATCHED
+PseudoAtom Symbol[1]: C, Socket Symbol[1]: C, MATCHED
+PseudoAtom Symbol[2]: O, Socket Symbol[2]: O, MATCHED
+PseudoAtom Symbol[3]: N, Socket Symbol[3]: N, MATCHED
+PseudoAtom Symbol[4]: Zn, Socket Symbol[4]: Zn, MATCHED
+PseudoAtom Symbol[5]: C, Socket Symbol[1]: C, MATCHED
+PseudoAtom Symbol[6]: O, Socket Symbol[2]: O, MATCHED
+PseudoAtom Symbol[7]: H, Socket Symbol[0]: H, MATCHED
+PseudoAtom Symbol[8]: M — massless, skipping
+PseudoAtom Symbol[9]: O, Socket Symbol[2]: O, MATCHED
+UCBox cell matrix (Angstrom):
+  [    26.741401      0.000000      0.000000 ]
+  [     0.000000     29.080499      0.000000 ]
+  [   -12.425125      0.000000     25.594223 ]
+Generated UC Box
+Component 0, Atom 0, xyz -0.259526 0.547197 3.740148, Type 4, SymbolIndex 4
+Component 0, Atom 1, xyz 5.031612 9.146302 4.791261, Type 4, SymbolIndex 4
+Component 0, Atom 2, xyz 7.102470 5.393946 0.525558, Type 4, SymbolIndex 4
+Component 0, Atom 3, xyz -2.330377 4.299550 8.005849, Type 4, SymbolIndex 4
+Component 0, Atom 4, xyz -1.238244 8.599657 3.148501, Type 3, SymbolIndex 3
+Component 0, Atom 1184, xyz 14.671868 26.073647 19.871662, Type 0, SymbolIndex 0
+Component 0, Atom 1185, xyz 9.188588 22.393849 22.785376, Type 0, SymbolIndex 0
+Component 0, Atom 1186, xyz 11.259443 21.226899 18.519672, Type 0, SymbolIndex 0
+Component 0, Atom 1187, xyz 12.601015 27.240599 24.137366, Type 0, SymbolIndex 0
+Component 1, Atom 0, xyz 0.000000 0.000000 0.000000, Type 5, SymbolIndex 1
+Component 1, Atom 1, xyz 0.000000 0.000000 -1.160000, Type 6, SymbolIndex 2
+Component 1, Atom 2, xyz 0.000000 0.000000 1.160000, Type 6, SymbolIndex 2
+DONE Copying Framework + template adsorbate atom into UCAtoms for Socket
+DONE Setting Test Adsorbate positions
+Connecting to MLIP server at: /tmp/graspa_f44b1c
+Connected successfully
+i-PI handshake complete
+Sent species map: 5 species, n_fw=1188
+[PrimeFW] n_fw=1188
+[PrimeFW] cell diag: 26.741401 29.080499 25.594223
+[PrimeFW] first atom xyz: -0.259526 0.547197 3.740148 type=4
+[CLIENT] POSDATA natoms=1188 config_type=0 n_mol=0
+  atom 0: -0.25953 0.54720 3.74015 type=4
+  atom 1: 5.03161 9.14630 4.79126 type=4
+  atom 2: 7.10247 5.39395 0.52556 type=4
+  atom 3: -2.33038 4.29955 8.00585 type=4
+  atom 4: -1.23824 8.59966 3.14850 type=3
+======================== CALCULATING INITIAL STAGE ENERGY ========================
+****** Calculating VDW + Real Energy (CPU) ******
+Host-Host   VDW: 0.00000; Real: 0.00000
+Host-Guest  VDW: 0.00000; Real: 0.00000
+Guest-Guest VDW: 0.00000; Real: 0.00000
+********** PRINTING COMPONENT ENERGIES**********
+Compoent [0-0], VDW: 0.00000, Real: 0.00000
+Compoent [0-1], VDW: 0.00000, Real: 0.00000
+Compoent [1-1], VDW: 0.00000, Real: 0.00000
+****** Calculating Ewald Energy (CPU) ******
+CPU Guest-Guest Fourier: 0.00000, Host-Host Fourier: 7037.08874, Framework-Guest Fourier: 0.00000
+Component: 0, SelfAtomE: 3036079.51635 (3651566.56459 kJ/mol)
+Component: 1, SelfAtomE: 0.00000 (0.00000 kJ/mol)
+Component: 0, Intra-Molecular ExclusionE: 3068090.83192 (3690067.35122 kJ/mol)
+Component: 1, Intra-Molecular ExclusionE: 0.00000 (0.00000 kJ/mol)
+HostEwald took 0.08438 sec
+Ewald Summation (total energy) on the CPU took 0.08438 secs
+Component 0, Intra Exclusion Energy: -3068090.83192 (-3690067.35122 kJ/mol)
+Component 0, Atom Self Exclusion Energy: 3036079.51635 (3651566.56459 kJ/mol)
+DEBUG: comp: 0, IntraE: -3068090.83192, SelfE: 3036079.51635
+Component 1, Intra Exclusion Energy: -14237.48390 (-17123.76764 kJ/mol)
+Component 1, Atom Self Exclusion Energy: 14272.83586 (17166.28630 kJ/mol)
+DEBUG: comp: 1, IntraE: -14237.48390, SelfE: 14272.83586
+******   Allocating Ewald WaveVectors + StructureFactors (INITIAL STAGE ONLY)   ******
+Allocated 38016 42768 38016 space for eikxyz
+Structure Factor 0 is 0.00000 0.00000
+Structure Factor 1 is 0.00000 0.00000
+Structure Factor 2 is 0.00000 0.00000
+Structure Factor 3 is 0.00000 0.00000
+Structure Factor 4 is 0.00000 0.00000
+Structure Factor 5 is 0.00000 0.00000
+Structure Factor 6 is 0.00000 0.00000
+Structure Factor 7 is 0.00000 0.00000
+Structure Factor 8 is 0.00000 0.00000
+Structure Factor 9 is 0.00000 0.00000
+****** DONE Allocating Ewald WaveVectors + StructureFactors(INITIAL STAGE ONLY) ******
+ ****** CHECKING StructureFactors (SF) Stored on CPU vs. GPU ****** 
+CPU SF: 2040, GPU SF: 2040
+StructureFactor 0, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 1, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 2, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 3, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 4, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 5, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 6, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 7, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 8, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 9, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+ ****** CHECKING Framework StructureFactors Stored on CPU ****** 
+Framework Structure Factor 0, real: 0.00000 imag: 0.00000
+Framework Structure Factor 1, real: 0.00000 imag: 0.00000
+Framework Structure Factor 2, real: 0.00000 imag: 0.00000
+Framework Structure Factor 3, real: 0.00000 imag: 0.00000
+Framework Structure Factor 4, real: 0.00000 imag: 0.00000
+Framework Structure Factor 5, real: 0.00000 imag: 0.00000
+Framework Structure Factor 6, real: 0.00000 imag: -0.00000
+Framework Structure Factor 7, real: 0.00000 imag: 0.00000
+Framework Structure Factor 8, real: -0.00000 imag: 0.00000
+Framework Structure Factor 9, real: 0.00000 imag: 0.00000
+VDW + Real on the GPU took 0.00000 secs
+Ewald Summation (total energy) on the GPU took 0.00047 secs
+Total GPU Energy: 
+====================== DONE CALCULATING INITIAL STAGE ENERGY ======================
+Component 1, Need to create 0 full molecule
+======================== CALCULATING CREATE_MOLECULE STAGE ENERGY ========================
+****** Calculating VDW + Real Energy (CPU) ******
+Host-Host   VDW: 0.00000; Real: 0.00000
+Host-Guest  VDW: 0.00000; Real: 0.00000
+Guest-Guest VDW: 0.00000; Real: 0.00000
+********** PRINTING COMPONENT ENERGIES**********
+Compoent [0-0], VDW: 0.00000, Real: 0.00000
+Compoent [0-1], VDW: 0.00000, Real: 0.00000
+Compoent [1-1], VDW: 0.00000, Real: 0.00000
+****** Calculating Ewald Energy (CPU) ******
+CPU Guest-Guest Fourier: 0.00000, Host-Host Fourier: 7037.08874, Framework-Guest Fourier: 0.00000
+Component: 0, SelfAtomE: 3036079.51635 (3651566.56459 kJ/mol)
+Component: 1, SelfAtomE: 0.00000 (0.00000 kJ/mol)
+Component: 0, Intra-Molecular ExclusionE: 3068090.83192 (3690067.35122 kJ/mol)
+Component: 1, Intra-Molecular ExclusionE: 0.00000 (0.00000 kJ/mol)
+HostEwald took 0.08366 sec
+Ewald Summation (total energy) on the CPU took 0.08367 secs
+ ****** CHECKING StructureFactors (SF) Stored on CPU vs. GPU ****** 
+CPU SF: 2040, GPU SF: 2040
+StructureFactor 0, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 1, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 2, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 3, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 4, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 5, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 6, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 7, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 8, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+StructureFactor 9, CPU: 0.00000 0.00000, GPU: 0.00000 0.00000
+ ****** CHECKING Framework StructureFactors Stored on CPU ****** 
+Framework Structure Factor 0, real: 0.00000 imag: 0.00000
+Framework Structure Factor 1, real: 0.00000 imag: 0.00000
+Framework Structure Factor 2, real: 0.00000 imag: 0.00000
+Framework Structure Factor 3, real: 0.00000 imag: 0.00000
+Framework Structure Factor 4, real: 0.00000 imag: 0.00000
+Framework Structure Factor 5, real: 0.00000 imag: 0.00000
+Framework Structure Factor 6, real: 0.00000 imag: -0.00000
+Framework Structure Factor 7, real: 0.00000 imag: 0.00000
+Framework Structure Factor 8, real: -0.00000 imag: 0.00000
+Framework Structure Factor 9, real: 0.00000 imag: 0.00000
+VDW + Real on the GPU took 0.00000 secs
+Ewald Summation (total energy) on the GPU took 0.00030 secs
+Total GPU Energy: 
+====================== DONE CALCULATING CREATE_MOLECULE STAGE ENERGY ======================
+Running Simulation Boxes in SERIAL, currently [0] box; pres: 120000.00000 [Pa], temp: 293.00000 [K]
+==================================
+== RUNNING INITIALIZATION PHASE ==
+==================================
+CBMC Uses 8 trial positions and 8 trial orientations
+Box 0, Volume: 19903.43092
+Total Volume: 19903.43092
+INITIALIZATION Cycle: 0, 0 Adsorbate Molecules, Total Energy: 0.00000  ||  Component 0 [calf20_ddec_super.cif], 1 Molecules  ||  Component 1 [CO2], 0 Molecules  ||  
+Python E_fw cache primed: -8049.369141 eV
+Socket connected and framework cache primed
+[QUERY_TOTAL] E_total_ev=0.000000
+HHVDW: 0.00000, HHReal: 0.00000, HGVDW: 0.00000, HGReal: 0.00000, GGVDW: 0.00000, GGReal: 0.00000, HHEwaldE: -0.00000,
+ HGEwaldE: 0.00000,
+ GGEwaldE: 0.00000, TailE: 0.00000, DNN_E: 0.00000
+Stored HGVDW: 0.00000, Stored HGReal: 0.00000, Stored HGEwaldE: 0.00000
+Socket: SyncFull complete after CreateMolecule_InOneBox
+[QUERY_TOTAL] E_total_ev=0.000000
+HHVDW: 0.00000, HHReal: 0.00000, HGVDW: 0.00000, HGReal: 0.00000, GGVDW: 0.00000, GGReal: 0.00000, HHEwaldE: -0.00000,
+ HGEwaldE: 0.00000,
+ GGEwaldE: 0.00000, TailE: 0.00000, DNN_E: 0.00000
+Stored HGVDW: 0.00000, Stored HGReal: 0.00000, Stored HGEwaldE: 0.00000
+============================================
+== END OF PREPARATION, SIMULATION STARTS! ==
+============================================
+MoveType: INSERTION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=12932.594732 Real=-1126.284251 EwaldE=-88.685078 DNN_E=-635.680292
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.033018
+  preFactor=0.586343 Beta=0.004105 TailE=0.000000 total=-635.713310
+MoveType: INSERTION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=28481.074336 Real=641.520053 EwaldE=5.076695 DNN_E=10916.155503
+  GG: VDW=0.000000 Real=0.000000 EwaldE=0.035558
+  preFactor=0.586343 Beta=0.004105 TailE=0.000000 total=10916.191061
+MoveType: INSERTION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=5674.843502 Real=-337.124666 EwaldE=14.353024 DNN_E=278.273456
+  GG: VDW=0.000000 Real=0.000000 EwaldE=0.007962
+  preFactor=0.586343 Beta=0.004105 TailE=0.000000 total=278.281417
+MoveType: INSERTION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=4269.506129 Real=-204.447445 EwaldE=-21.283401 DNN_E=-18.531934
+  GG: VDW=0.000000 Real=0.000000 EwaldE=0.067740
+  preFactor=0.586343 Beta=0.004105 TailE=0.000000 total=-18.464194
+MoveType: INSERTION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-184.209447 Real=15.370904 EwaldE=0.870428 DNN_E=-923.081692
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.018854
+  preFactor=0.586343 Beta=0.004105 TailE=0.000000 total=-923.100546
+MoveType: TRANS
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-2469.108107 Real=157.870175 EwaldE=-35.994031 DNN_E=-1926.879432
+  GG: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=-1926.879432
+MoveType: TRANS
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=496.484218 Real=-427.249885 EwaldE=-32.450030 DNN_E=-782.040242
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.000000
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=-782.040242
+MoveType: INSERTION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-2053.220088 Real=-471.443092 EwaldE=-121.393483 DNN_E=-4701.443006
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.084079
+  preFactor=0.293172 Beta=0.004105 TailE=0.000000 total=-4701.527085
+MoveType: TRANS
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=37776.489579 Real=-1388.083115 EwaldE=-5.523025 DNN_E=15716.515236
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.056713
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=15716.458523
+MoveType: ROTATION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=120.579012 Real=-375.912650 EwaldE=-49.560051 DNN_E=-848.015398
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.081356
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=-848.096754
+MoveType: DELETION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-2036.254324 Real=-629.921456 EwaldE=-117.133684 DNN_E=-4484.727960
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.204409
+  preFactor=3.410971 Beta=0.004105 TailE=-0.000000 total=-4484.932369
+MoveType: TRANS
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=21627.600875 Real=-1005.526830 EwaldE=12.490948 DNN_E=3980.924367
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.056180
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=3980.868187
+MoveType: ROTATION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=1118.197407 Real=-127.275150 EwaldE=5.643642 DNN_E=390.992516
+  GG: VDW=0.000000 Real=0.000000 EwaldE=0.084006
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=391.076522
+MoveType: TRANS
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=21734.203741 Real=85.227594 EwaldE=21.229688 DNN_E=10835.752307
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.022547
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=10835.729760
+MoveType: ROTATION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-488.778685 Real=21.808368 EwaldE=19.377118 DNN_E=197.833453
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.048146
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=197.785307
+MoveType: TRANS
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=107956.069834 Real=830.123789 EwaldE=65.892812 DNN_E=19056.827277
+  GG: VDW=0.000000 Real=0.000000 EwaldE=0.036890
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=19056.864166
+MoveType: DELETION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-2053.220088 Real=-471.443092 EwaldE=-121.393483 DNN_E=-4710.846996
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.216920
+  preFactor=3.410971 Beta=0.004105 TailE=-0.000000 total=-4711.063916
+MoveType: ROTATION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=5639.508417 Real=-260.350012 EwaldE=-9.457929 DNN_E=1498.123730
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.017988
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=1498.105742
+MoveType: ROTATION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=4287.493005 Real=439.224775 EwaldE=3.773236 DNN_E=1714.875583
+  GG: VDW=0.000000 Real=0.000000 EwaldE=0.138582
+  preFactor=0.000000 Beta=0.004105 TailE=0.000000 total=1715.014165
+MoveType: INSERTION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-1857.652117 Real=-494.290736 EwaldE=-70.270237 DNN_E=-4513.031946
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.184788
+  preFactor=0.195448 Beta=0.004105 TailE=0.000000 total=-4513.216734
+MoveType: DELETION
+  HH: VDW=0.000000 Real=0.000000 EwaldE=0.000000
+  HG: VDW=-2036.254324 Real=-629.921456 EwaldE=-117.133684 DNN_E=-4475.379179
+  GG: VDW=0.000000 Real=0.000000 EwaldE=-0.337080
+  preFactor=5.116457 Beta=0.004105 TailE=-0.000000 total=-4475.716259

@@ -144,6 +144,9 @@ static inline void GibbsParticleTransfer(Variables& Vars, size_t SelectedCompone
   //This assumes that the two boxes share the same temperature, it might not be true//
   if(Get_Uniform_Random()< PAcc) Accept = true;
 
+  // printf(Accept ? "ACCEPTED" : "REJECTED");
+  // fflush(stdout);
+
   //printf("CYCLE: %zu, Insertion box: %zu, delete box: %zu, delete molecule: %zu, InsertionRosen: %.5f, DeletionRosen: %.5f, PAcc: %.5f\n", SystemComponents[0].CURRENTCYCLE, SelectedBox, OtherBox, DeletionSelectedMol, InsertionRosen, DeletionRosen, PAcc);
 
   if(Accept)
@@ -379,6 +382,9 @@ static inline MoveEnergy IdentitySwapMove(Variables& Vars, size_t systemId)
   double RANDOM = Get_Uniform_Random();
   bool Accept = false;
   if(RANDOM < Pacc) Accept = true;
+
+  // printf(Accept ? "ACCEPTED" : "REJECTED");
+  // fflush(stdout);
 
   if(Accept)
   { // accept the move

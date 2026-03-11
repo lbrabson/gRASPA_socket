@@ -29,7 +29,7 @@ Target-Gibbs-volume-change: 0.500000
 
 Components: 1 (Adsorbates 0, Cations 0)
 ========================================================================
-Components 0 (TIP4P) 
+Components 0 (CO2) 
 
 Maximum-translation-change component 0: 2.67414 2.90805 2.55942
 Maximum-translation-in-plane-change component 0: 0.000000,0.000000,0.000000
@@ -37,5 +37,5 @@ Maximum-rotation-change component 0: 0.523583 0.523583 0.523583
 
 Reactions: 0
 
-Component: 0   Adsorbate 0 molecules of TIP4P
+Component: 0   Adsorbate 0 molecules of CO2
 ------------------------------------------------------------------------

@@ -264,7 +264,6 @@ void read_simulation_input(Variables& Vars, bool *ReadRestart, bool *SameFramewo
         Vars.TempWidom.Useflag = true;
       }
     }
-  
     if (str.find("RandomSeed", 0) != std::string::npos)
     {
       Split_Tab_Space(termsScannedLined, str);
@@ -3072,7 +3071,14 @@ void ReadDNNModelSetup(Components& SystemComponents)
         SystemComponents.UseDNNforHostGuest = true;
         //printf("Using DNN Model\n");
       }
-      break;
+    }
+    if (str.find("DebugMode", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      if(caseInSensStringCompare(termsScannedLined[1], "yes"))
+      {
+        SystemComponents.DebugMode = true;
+      }
     }
   }
   if(!SystemComponents.UseDNNforHostGuest) return;

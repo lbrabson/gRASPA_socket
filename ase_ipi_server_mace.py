@@ -58,6 +58,10 @@ def get_calculator(args):
         default_dtype=args.dtype,
     )
     print(f"Loaded MACE model: {args.model}  device={args.device}")
+
+    # from chgnet.model import CHGNetCalculator
+    # calc = CHGNetCalculator(seed = 42, use_device="cuda")
+
     return calc
 
 
@@ -265,8 +269,8 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
         if natoms > 0:
             types_raw = _recvall(conn, 4 * natoms)
             types_arr = struct.unpack(f"!{natoms}i", types_raw)
-            print(f"[SERVER] types_arr sample: {types_arr[:10]}")
-            print(f"[SERVER] species_map keys: {list(species_map.keys())}")
+            #print(f"[SERVER] types_arr sample: {types_arr[:10]}")
+            #print(f"[SERVER] species_map keys: {list(species_map.keys())}")
             sys.stdout.flush()
             positions = recv_doubles(conn, 3 * natoms).reshape(natoms, 3)
             symbols   = [species_map[t] for t in types_arr]
