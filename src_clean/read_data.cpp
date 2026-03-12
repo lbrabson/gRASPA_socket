@@ -3080,6 +3080,14 @@ void ReadDNNModelSetup(Components& SystemComponents)
         SystemComponents.DebugMode = true;
       }
     }
+    if (str.find("UsePureDNN", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      if(caseInSensStringCompare(termsScannedLined[1], "yes"))
+      {
+        SystemComponents.UsePureDNN = true;
+      }
+    }
   }
   if(!SystemComponents.UseDNNforHostGuest) return;
 

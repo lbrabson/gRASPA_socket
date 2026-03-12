@@ -37,6 +37,7 @@ CutOffCoulomb 12.8
 EwaldPrecision 1e-6
 
 UseDNNforHostGuest yes
+UsePureDNN yes
 DebugMode yes
 DNNModelName Socket
 DNNMethod Socket

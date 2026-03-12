@@ -33,7 +33,7 @@ echo "Socket: ${SOCKET_PATH}"
 rm -f "${SOCKET_PATH}"
 
 echo "Starting MACE iPI server (model: ${MODEL})..."
-python ase_ipi_server_mace.py \
+python ase_ipi_server_mace_pure_dnn.py \
     --socket "${SOCKET_NAME}" \
     --model "${MODEL}" \
     --dtype float32 \

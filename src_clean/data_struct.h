@@ -471,7 +471,7 @@ struct MoveEnergy
     printf("HHVDW: %.5f, HHReal: %.5f, HGVDW: %.5f, HGReal: %.5f, GGVDW: %.5f, GGReal: %.5f, HHEwaldE: %.5f,\n HGEwaldE: %.5f,\n GGEwaldE: %.5f, TailE: %.5f, DNN_E: %.5f\n", HHVDW, HHReal, HGVDW, HGReal, GGVDW, GGReal, HHEwaldE, HGEwaldE, GGEwaldE, TailE, DNN_E);
     printf("Stored HGVDW: %.5f, Stored HGReal: %.5f, Stored HGEwaldE: %.5f\n", storedHGVDW, storedHGReal, storedHGEwaldE);
   };
-  void DNN_Replace_Energy()
+  void DNN_Replace_Energy(bool UsePureDNN = false)
   {
     storedHGVDW = HGVDW;
     storedHGReal= HGReal;
@@ -479,6 +479,17 @@ struct MoveEnergy
     HGVDW = 0.0;
     HGReal= 0.0;
     HGEwaldE = 0.0; // do not use classical Ewald for long-range electrostatics
+    
+    // if using pure DNN, the MLIP energy also accounts for HH and GG contributions
+    if(UsePureDNN)
+    {
+      HHVDW = 0.0;
+      HHReal = 0.0;
+      HHEwaldE = 0.0;
+      GGVDW = 0.0;
+      GGReal = 0.0;
+      GGEwaldE = 0.0;
+    }
   }
   double DNN_Correction() //Using DNN energy to replace HGVDW, HGReal and HGEwaldE//
   {
@@ -1097,6 +1108,7 @@ struct Components
   //General DNN Flags//
   bool UseDNNforHostGuest = false;
   bool DebugMode = false;
+  bool UsePureDNN = false;
   size_t TranslationRotationDNNReject=0;
   size_t ReinsertionDNNReject=0;
   size_t InsertionDNNReject=0;

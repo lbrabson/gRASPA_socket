@@ -122,7 +122,7 @@ inline MoveEnergy Insertion_Body(Variables& Vars, size_t systemId, CBMC_Variable
       printf("  GG: VDW=%.6f Real=%.6f EwaldE=%.6f\n", energy.GGVDW, energy.GGReal, energy.GGEwaldE);
     }
 
-    energy.DNN_Replace_Energy();
+    energy.DNN_Replace_Energy(SystemComponents.UsePureDNN);
 
     if(SystemComponents.DebugMode)
     {
@@ -229,7 +229,7 @@ inline MoveEnergy Deletion_Body(Variables& Vars, size_t systemId, CBMC_Variables
       printf("  GG: VDW=%.6f Real=%.6f EwaldE=%.6f\n", energy.GGVDW, energy.GGReal, energy.GGEwaldE);
     }
 
-    energy.DNN_Replace_Energy();
+    energy.DNN_Replace_Energy(SystemComponents.UsePureDNN);
 
     if(SystemComponents.DebugMode)
     {

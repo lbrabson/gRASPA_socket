@@ -322,7 +322,7 @@ struct ReinsertionMove
       //Prepare_DNN_InitialPositions_Reinsertion(Sims.d_a, Sims.Old, SystemComponents.tempMolStorage, SystemComponents, SelectedComponent, UpdateLocation);
       energy.DNN_E = DNN_Prediction_Reinsertion(SystemComponents, Sims, SelectedComponent, SystemComponents.tempMolStorage);
       //Correction of DNN - HostGuest energy to the Rosenbluth weight//
-      energy.DNN_Replace_Energy();
+      energy.DNN_Replace_Energy(SystemComponents.UsePureDNN);
       double correction = energy.DNN_Correction();
       if(fabs(correction) > SystemComponents.DNNDrift) //If there is a huge drift in the energy correction between DNN and Classical HostGuest//
       {

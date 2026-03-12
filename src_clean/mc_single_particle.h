@@ -235,7 +235,7 @@ inline MoveEnergy SingleBody_Calculation(Variables& Vars, size_t systemId)
         printf("  GG: VDW=%.6f Real=%.6f EwaldE=%.6f\n", tot.GGVDW, tot.GGReal, tot.GGEwaldE);
       }
 
-      tot.DNN_Replace_Energy();
+      tot.DNN_Replace_Energy(SystemComponents.UsePureDNN);
       
       if(SystemComponents.DebugMode)
       {
