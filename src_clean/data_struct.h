@@ -489,6 +489,7 @@ struct MoveEnergy
       GGVDW = 0.0;
       GGReal = 0.0;
       GGEwaldE = 0.0;
+      TailE = 0.0;
     }
   }
   double DNN_Correction() //Using DNN energy to replace HGVDW, HGReal and HGEwaldE//
