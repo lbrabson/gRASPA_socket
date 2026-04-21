@@ -2811,12 +2811,12 @@ void LMPDataFileParser(Boxsize& Box, Components& SystemComponents)
   file.close();
 }
 
-void RestartFileParser(Boxsize& Box, Components& SystemComponents)
+void RestartFileParser(Boxsize& Box, Components& SystemComponents, size_t systemId)
 {
   std::string scannedLine; std::string str;
   std::vector<std::string> termsScannedLined{};
   //Determine framework name (file name)//
-  std::string Filename = "RestartInitial/System_0/restartfile";
+  std::string Filename = "RestartInitial/System_" + std::to_string(systemId) + "/restartfile";
   std::ifstream file(Filename);
   std::filesystem::path pathfile = std::filesystem::path(Filename);
   if (!std::filesystem::exists(pathfile))

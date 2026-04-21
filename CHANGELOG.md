@@ -1,5 +1,201 @@
 # Changelog
 
+## 2026-04-20 — Fix: unified-memory race condition causes kmax=(0,0,0) crash in NVTGibbsMove
+
+**Summary:** On multi-GPU nodes, `NVTGibbsMove` could crash with `CUDA Error: illegal memory access` inside `TotalFourierEwald`. The crash was traced to `kmax=(0,0,0)` being passed to `Ewald_TotalEnergy`: with kmax=0 in any axis, `Setup_Wave_Vector_Ewald` writes to `eik_x[i + 1*NTotalAtom]` even though only `NTotalAtom` elements were allocated (since `tempEikAllocateSize = NTotalAtom * max(1, kmax.x+1)`), producing an out-of-bounds write.
+
+**Root cause:** `Sims` is allocated with `cudaMallocManaged` (`main.cpp:142`), so writes from GPU kernels are visible to the CPU via unified memory. `ScalePositions` computes and writes `Box.kmax` to managed memory, but it runs asynchronously. When the CPU subsequently reads `Sims[sim].Box.kmax` in `Ewald_TotalEnergy` without a prior `cudaDeviceSynchronize`, the read can race with CUDA's page-migration mechanism on a multi-GPU node: while the page containing `Box.kmax` is in transit between GPUs, the CPU reads zeros, giving kmax=(0,0,0).
+
+**Fix:** Compute kmax on the CPU directly from `newV[sim]` (trial path) or `OldV[sim]` (reject path) using the same formula as `ScalePositions`, immediately before any kernel is launched. Because the CPU computation is synchronous and uses values already in CPU memory, there is no possible race.
+
+**Formula:** `kmax = max(1, round(0.25 + cbrt(V) × Alpha × tol1 × (1/π)))`, where `1/π = 0.31830988618`.  `ReciprocalCutOff` is updated to `(1.05 × kmax)²` in the same loop.
+
+**Files changed:**
+
+- `src_clean/mc_box.h` (`NVTGibbsMove`, trial path, after `OldV` assignments) — added CPU loop over all `NBox` simulations that computes kmax from `newV[sim]` and writes it to `Sims[sim].Box.kmax.{x,y,z}` and `Sims[sim].Box.ReciprocalCutOff` before `ScalePositions` is launched. Guarded by `if(!FF.noCharges)`.
+- `src_clean/mc_box.h` (`NVTGibbsMove`, reject path, inside reject loop after `Revert_Boxsize<<<1,1>>>`) — added CPU kmax restoration from `OldV[sim]` using the same formula, guarded by `if(!FF.noCharges)`.
+
+---
+
+## 2026-04-19 — Fix: Ewald `tempEikAllocateSize` desync after volume-move acceptance
+
+**Summary:** After a Gibbs or NPT volume-move acceptance, the swap of `tempEik ↔ AdsorbateEik` was not accompanied by a matching swap of `EikAllocateSize ↔ tempEikAllocateSize`. This left `tempEikAllocateSize` reporting the larger just-grown size while `tempEik` actually pointed to the smaller old `AdsorbateEik` buffer. Any subsequent Ewald total energy call whose k-vector count fell between those two sizes would skip the reallocation guard and write past the end of the buffer, corrupting GPU memory and eventually causing a CUDA illegal memory access.
+
+**Root cause:** On acceptance, `tempEik` becomes the old `AdsorbateEik` (smaller), so `tempEikAllocateSize` must be reset to `EikAllocateSize` (the old `AdsorbateEik` size). The symmetric `std::swap` achieves this while simultaneously setting `EikAllocateSize` to the new, larger value for `AdsorbateEik`.
+
+**Files changed:**
+
+- `src_clean/mc_box.h` (line ~300, `VolumeMove`) — `EikAllocateSize = tempEikAllocateSize` → `std::swap(EikAllocateSize, tempEikAllocateSize)`
+- `src_clean/mc_box.h` (line ~462, `NVTGibbsMove`) — same change
+
+---
+
+## 2026-04-19 — Fix: stale GPU positions in SYNC_FULL after `CreateMolecule_InOneBox`
+
+**Summary:** In Gibbs ensemble runs with `CreateNumberOfMolecules > 0`, the initial `SyncFull` call (which primes `E_current` on the ML server) was sending all-zero positions. `CreateMolecule_InOneBox` places molecules directly on the GPU; `HostSystem[comp].pos` is not automatically mirrored from device memory, so `SyncFull` read stale (zero-initialised) host arrays. The server built a `comp_molecules` list of zero-position atoms, setting `E_current` to a physically wrong value and corrupting all subsequent delta-energy calculations.
+
+**Root cause:** Missing `cudaMemcpy` (device → host) before the `SyncFull` call in `PATCH_SOCKET_POST_CREATEMOL`. The fix copies the `Atoms` headers from the GPU first (to obtain the live device pointers), then copies the position array for each adsorbate component to `HostSystem[comp].pos` before `SyncFull` is invoked.
+
+**Files changed:**
+
+- `socket-patch/Socket/PATCH_SOCKET_main.cpp.txt` (`PATCH_SOCKET_POST_CREATEMOL` section) — added two-step `cudaMemcpy` (device→host `Atoms` headers, then device→host positions per component) before the `SyncFull` loop
+
+---
+
+## 2026-04-19 — Enable restarts of a simulation with two boxes; handle two socket paths simultaneously
+
+**Summary:** Socket preparation is edited to enable using separate socket paths for different
+simulation boxes and to allow for simultaneous restarting of multiple simulation boxes
+
+**Files changed:**
+
+- `patch_Socket/main.cpp` (line 398) — read user-specified socket path from env variables
+- `patch_Socket/main.cpp` (line 263) — restart box of a specific simulation when one command 
+file runs several sims
+- `patch_Socket/read_data.cpp` (line 2819) — edit filename of Restart file to 
+account for sim ID
+- `patch_Socket/read_data.h` (line 40) — update `RestartFileParser` class declaration
+to include number of simulation boxes
+
+---
+
+## 2026-04-07 — Gibbs ensemble (NVTGibbsMove) DNN support via iPI socket
+
+**Summary:** Extended the socket DNN path to cover Gibbs ensemble volume moves
+(`NVTGibbsMove`). Previously the Gibbs volume move computed energy using the
+classical force field only, bypassing the socket even when `UsePureDNN yes` was
+set. Gibbs particle transfers were already handled by the existing GCMC
+insertion/deletion patch chain and required no changes.
+
+**Root cause:** `NVTGibbsMove` performs a two-box volume rescaling (one box grows,
+the other shrinks, total volume conserved). The server's stored cell matrix and
+adsorbate positions become stale after the rescaling because `SyncFull` was never
+called from the volume-move path and the server received no notification of the
+cell change.
+
+**Design:** The per-volume-move socket cost is exactly 2 × `SyncFull` calls on
+acceptance (one per box with new scaled positions) or 2 × `SyncFull` calls on
+rejection (to restore old positions). On the trial step, 1 × `SyncFull` per box
+updates the server to the trial configuration and the returned energy feeds
+`NewE[sim].DNN_E`. `CurrentE.DNN_E` is already correct from the accumulated
+`deltaE`, so no additional `QueryTotal` call is needed. On rejection, `ScaleCellBy`
+undoes the cell scale and `SyncFull` restores the old positions.
+
+**New method — `ScaleCellBy(double scale)`** added to `Socket` in
+`ase_energy_client.h`: multiplies all 9 elements of `UCBox.Cell` by `scale` and
+recomputes `UCBox.InverseCell`. Called before `SyncFull` to keep the socket
+client's cell in sync with the simulation box after a volume move.
+
+**Return type change — `SyncFull`**: changed from `void` to `double`. Returns the
+raw energy (eV) received from the server so the volume-move acceptance criterion
+can use `E_new_dnn[sim]` directly without a separate `QueryTotal` call.
+
+**Files changed:**
+
+- `src_clean/ase_energy_client.h`
+  - `SyncFull` return type: `void` → `double`; returns the eV energy from the server
+  - New `ScaleCellBy(double scale)` method added after `GenerateUCBox`
+
+- `src_clean/mc_box.h`
+  - Three patch markers added to `NVTGibbsMove`:
+    - `//###PATCH_SOCKET_GIBBS_VOL_DNN_TRIAL###//` — after classical energy loop, before acceptance
+    - `//###PATCH_SOCKET_GIBBS_VOL_DNN_ACCEPT###//` — inside accept branch after Eik swap
+    - `//###PATCH_SOCKET_GIBBS_VOL_DNN_REJECT###//` — inside reject branch after `Revert_Boxsize`
+
+- `socket-patch/Socket/PATCH_SOCKET_mc_box.h.txt` *(new file)*
+  - Three sections: `PATCH_SOCKET_GIBBS_VOL_DNN_TRIAL`, `PATCH_SOCKET_GIBBS_VOL_DNN_ACCEPT`,
+    `PATCH_SOCKET_GIBBS_VOL_DNN_REJECT`
+  - Trial section: saves old positions per component (GPU first half → host), calls
+    `ScaleCellBy(ScaleAB[sim])`, then `SyncFull` with new scaled positions (GPU second half),
+    stores result in `NewE[sim].DNN_E`, calls `DNN_Replace_Energy`
+  - Accept section: after `CopyScaledPositions`, updates `HostSystem[comp].pos` via
+    `cudaMemcpy` so the server's state is reflected in host memory for future resyncs
+  - Reject section: calls `ScaleCellBy(1.0/ScaleAB[sim])` to undo cell scale, then
+    `SyncFull` with saved old positions to restore server state
+
+- `patch_Socket/mc_box.h` — updated to match what `patch.py` would produce:
+  `_PATCHED` marker lines followed by the DNN code blocks
+
+- `patch_Socket/ase_energy_client.h` — synced to `src_clean/ase_energy_client.h`
+
+**Note:** Gibbs particle transfers (insertion in one box, deletion in the other)
+are correctly handled by the existing GCMC `PATCH_SOCKET_INSERTION` /
+`PATCH_SOCKET_DELETION` → `CommitInsert` / `CommitDelete` chain. No changes needed
+for particle transfers.
+
+**Note:** `QueryTotal` was also added to the implementation but removed before
+finalizing: `E_old` is already accumulated in `deltaE.DNN_E` from accepted moves,
+so fetching it from the server is a redundant ML call and was removed to avoid the
+extra round-trip cost per volume move.
+
+---
+
+## 2026-04-07 — Fix: zero tail correction when `UsePureDNN yes`
+
+**Summary:** `DNN_Replace_Energy()` in `MoveEnergy` now zeroes `TailE` when
+`UsePureDNN` is true. Previously, when all classical host-guest, host-host, and
+guest-guest terms were zeroed, the tail correction (a classical long-range VDW
+correction) was left non-zero. For a pure-DNN simulation the tail correction is
+physically wrong — the MLIP already captures all long-range interactions — so
+retaining it double-counted a classical correction against a fully ML-computed energy.
+
+**Files changed:**
+
+- `src_clean/data_struct.h` (line 492) — added `TailE = 0.0;` inside the
+  `if(UsePureDNN)` block of `DNN_Replace_Energy()`
+- `patch_Socket/data_struct.h` (line 494) — same change (kept in sync)
+
+---
+
+## 2026-03-12 — Add pure DNN mode (`UsePureDNN`)
+
+**Summary:** Added a `UsePureDNN yes` simulation input option that lets the MLIP handle all interatomic interactions (host–host, host–guest, and guest–guest) without any classical force-field contribution. Previously `DNN_Replace_Energy` only zeroed the host–guest classical terms; with `UsePureDNN`, the host–host and guest–guest VDW, Real, and Ewald terms are zeroed as well.
+
+**New keyword:** `UsePureDNN yes` in the DNN model setup block of `simulation.input`.
+
+**Files changed:**
+
+- `src_clean/data_struct.h` — `DNN_Replace_Energy()` gains a `bool UsePureDNN = false` argument; when `true`, additionally zeroes `HHVDW`, `HHReal`, `HHEwaldE`, `GGVDW`, `GGReal`, `GGEwaldE`. Added `bool UsePureDNN = false` field to `Components` struct.
+- `src_clean/read_data.cpp` — Parses `UsePureDNN yes` in `ReadDNNModelSetup`.
+- `src_clean/main.cpp` — Propagates `UsePureDNN` flag when copying component settings across simulation boxes.
+- `src_clean/mc_swap_utilities.h` — `Insertion_Body` and `Deletion_Body` pass `SystemComponents.UsePureDNN` to `DNN_Replace_Energy`.
+- `ase_ipi_server_mace_pure_dnn.py` *(new file)* — Alternative server variant for pure DNN mode. Returns `[E(fw+trial) − E_isolated_mol] − E_current` for insertions and `[E(fw+trial) + E_isolated_mol] − E_current` for deletions, so that guest–guest interactions are fully captured by the MLIP. Mirrors the protocol and state machine of `ase_ipi_server_mace.py` but subtracts an isolated-molecule self-energy on each delta query.
+
+---
+
+## 2026-03-11 — Add debug mode to print constituent energies
+
+**Summary:** Added a `DebugMode yes` simulation input option that prints a per-move breakdown of all energy components before and after `DNN_Replace_Energy`, useful for diagnosing socket energy issues.
+
+**New keyword:** `DebugMode yes` in the DNN model setup block of `simulation.input`.
+
+**Files changed:**
+
+- `src_clean/data_struct.h` — Added `bool DebugMode = false` field to `Components`.
+- `src_clean/read_data.cpp` — Parses `DebugMode yes` in `ReadDNNModelSetup`.
+- `src_clean/main.cpp` — Propagates `DebugMode` flag when copying component settings.
+- `src_clean/mc_single_particle.h` — When debug mode is active, prints HH/HG/GG VDW, Real, Ewald, `DNN_E`, `preFactor`, `Beta`, `TailE`, and total energy for translation/rotation moves both before and after `DNN_Replace_Energy`.
+- `src_clean/mc_swap_utilities.h` — Same per-component printout for insertion and deletion moves.
+
+---
+
+## 2026-03-05 — Fix: massless-site support in many-body socket patch
+
+**Summary:** Pseudo-atoms with zero mass (e.g. TIP4P M-site charge site) are now excluded from the atom list sent over the socket. Previously, all adsorbate atoms were forwarded regardless of mass, causing the server to receive unphysical massless-site positions that the MLIP cannot handle.
+
+**Root cause:** `Match_Element_PseudoAtom_with_model()` tried to match every pseudo-atom symbol — including massless virtual sites — against the MLIP's element list. The default "pass all atoms" path in `main.cpp` also included them without checking mass.
+
+**Files changed:**
+
+- `src_clean/ase_energy_client.h`
+  - `Match_Element_PseudoAtom_with_model()`: skips pseudo-atoms whose `PseudoAtoms.mass[i] <= 0.0` (logs a `massless, skipping` message instead of attempting to match).
+- `src_clean/main.cpp`
+  - Default `ConsiderThisAdsorbateAtom` initialisation (no `DNNPseudoAtoms` keyword) now checks `PseudoAtoms.mass[pseudoAtomType] > 0.0` per atom-site; massless sites receive `false`.
+- `socket-patch/Socket/PATCH_SOCKET_main.cpp.txt`
+  - Element symbol list built for the socket now filters out symbols that have no mass-bearing pseudo-atom entry, preventing massless species from appearing in the type map sent to the server.
+
+---
+
 ## 2026-03-04 — Auto-generate socket name; propagate via `GRASPA_SOCKET_PATH`
 
 **Summary:** The UNIX socket path is now auto-generated per run, eliminating manual
@@ -373,6 +569,19 @@ rather than sleeping a fixed amount.
    and C++ client both use `/tmp/ase_ipi_socket`. Introduced a `SOCKET_PATH`
    variable derived consistently from `SOCKET_NAME`. Also corrected `--device`
    from `cpu` to `cuda` for GPU runs.
+
+---
+
+## 2026-02-18 — Fix: segfault from uninitialized `ConsiderThisAdsorbateAtom` when `DNNPseudoAtoms` is absent
+
+**Summary:** When `DNNPseudoAtoms` was not specified in the simulation input, `ConsiderThisAdsorbateAtom` was left as an uninitialized pointer and subsequently dereferenced, causing a segfault during initialization.
+
+**Root cause:** `Components` declared `bool* ConsiderThisAdsorbateAtom` without a default value. The init loop in `main.cpp` read from it unconditionally before it was ever allocated.
+
+**Files changed:**
+
+- `src_clean/data_struct.h` (and `patch_Socket/data_struct.h`) — Default-initializes `ConsiderThisAdsorbateAtom = nullptr`.
+- `src_clean/main.cpp` (and `patch_Socket/main.cpp`) — Gates the copy loop behind a null check. If the pointer is `nullptr` (no `DNNPseudoAtoms` keyword), defaults all entries to `true` (pass every adsorbate atom to the model).
 
 ---
 

@@ -975,7 +975,7 @@ struct MoveTempStorage
     Pacc   = 0.0;
     New_Index = 0;
     Old_Index = 0;
-    
+
     preFactor = 0.0;
     UpdateLocation = 0;
     Scale = {1.0, 1.0};

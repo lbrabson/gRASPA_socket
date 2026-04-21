@@ -297,7 +297,7 @@ void VolumeMove(Components& SystemComponents, Simulations& Sim, ForceField FF)
     {
       std::swap(Sim.Box.tempEik,          Sim.Box.AdsorbateEik);
       std::swap(Sim.Box.tempFrameworkEik, Sim.Box.FrameworkEik);
-      SystemComponents.EikAllocateSize = SystemComponents.tempEikAllocateSize;
+      std::swap(SystemComponents.EikAllocateSize, SystemComponents.tempEikAllocateSize);
     }
   }
   else
@@ -366,7 +366,24 @@ void NVTGibbsMove(std::vector<Components>& SystemComponents, Simulations*& Sims,
   OldV[SelectedBox] = OldVA;
   OldV[OtherBox]    = OldVB;
 
-  MoveEnergy CurrentE[2]; 
+  // Compute kmax on the CPU from new volumes BEFORE launching ScalePositions.
+  // ScalePositions also writes kmax to managed memory, but it runs asynchronously;
+  // reading Sims[sim].Box.kmax without a sync can race with unified-memory page
+  // migration on multi-GPU nodes and return stale or zero values.
+  if(!FF.noCharges)
+  {
+    for(size_t sim = 0; sim < NBox; sim++)
+    {
+      double new_edge = std::cbrt(newV[sim]);
+      int new_kmax = std::max(1, (int)std::round(0.25 + new_edge * Sims[sim].Box.Alpha * Sims[sim].Box.tol1 * 0.31830988618));
+      Sims[sim].Box.kmax.x = new_kmax;
+      Sims[sim].Box.kmax.y = new_kmax;
+      Sims[sim].Box.kmax.z = new_kmax;
+      Sims[sim].Box.ReciprocalCutOff = pow(1.05 * static_cast<double>(new_kmax), 2);
+    }
+  }
+
+  MoveEnergy CurrentE[2];
   MoveEnergy NewE[2];
   MoveEnergy DeltaE[2];
 
@@ -414,6 +431,7 @@ void NVTGibbsMove(std::vector<Components>& SystemComponents, Simulations*& Sims,
       NewE[sim].TailE = TotalTailCorrection(SystemComponents[sim], FF.size, Sims[sim].Box.Volume);
     }
   }
+  //###PATCH_SOCKET_GIBBS_VOL_DNN_TRIAL###//
   //If the Gibbs Volume Move is Accepted, for the test, assume it is always accepted//
   bool Accept = false;
   if(!Overlap)
@@ -458,8 +476,9 @@ void NVTGibbsMove(std::vector<Components>& SystemComponents, Simulations*& Sims,
       {
         std::swap(Sims[sim].Box.tempEik,          Sims[sim].Box.AdsorbateEik);
         std::swap(Sims[sim].Box.tempFrameworkEik, Sims[sim].Box.FrameworkEik);
-        SystemComponents[sim].EikAllocateSize = SystemComponents[sim].tempEikAllocateSize;
+        std::swap(SystemComponents[sim].EikAllocateSize, SystemComponents[sim].tempEikAllocateSize);
       }
+      //###PATCH_SOCKET_GIBBS_VOL_DNN_ACCEPT###//
     }
   }
   else
@@ -470,6 +489,17 @@ void NVTGibbsMove(std::vector<Components>& SystemComponents, Simulations*& Sims,
       Sims[sim].Box.Volume = OldV[sim];
       Revert_Boxsize<<<1,1>>>(Sims[sim].Box, ScaleAB[sim], FF.noCharges, OldV[sim]);
       checkCUDAError("NVTGibbs: Error in Revert_Boxsize\n");
+      // Restore kmax on CPU from old volume (same race-condition fix as trial path)
+      if(!FF.noCharges)
+      {
+        double old_edge = std::cbrt(OldV[sim]);
+        int old_kmax = std::max(1, (int)std::round(0.25 + old_edge * Sims[sim].Box.Alpha * Sims[sim].Box.tol1 * 0.31830988618));
+        Sims[sim].Box.kmax.x = old_kmax;
+        Sims[sim].Box.kmax.y = old_kmax;
+        Sims[sim].Box.kmax.z = old_kmax;
+        Sims[sim].Box.ReciprocalCutOff = pow(1.05 * static_cast<double>(old_kmax), 2);
+      }
+      //###PATCH_SOCKET_GIBBS_VOL_DNN_REJECT###//
     }
   }
   //DEBUG//

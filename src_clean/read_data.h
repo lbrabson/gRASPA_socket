@@ -37,7 +37,7 @@ void ReadRestartInputFileType(Components& SystemComponents);
 
 void LMPDataFileParser(Boxsize& Box, Components& SystemComponents);
 
-void RestartFileParser(Boxsize& Box, Components& SystemComponents);
+void RestartFileParser(Boxsize& Box, Components& SystemComponents, size_t systemId = 0);
 
 void read_Ewald_Parameters_from_input(double CutOffCoul, Boxsize& Box, double precision);
 

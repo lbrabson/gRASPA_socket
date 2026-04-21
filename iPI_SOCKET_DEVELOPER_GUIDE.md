@@ -298,8 +298,9 @@ struct Socket {
 | `CommitInsert(ads_comp)` | Commit accepted insertion to server; server appends mol, recomputes E_current |
 | `CommitDelete(ads_comp, mol_idx)` | Commit accepted deletion; server swap-with-last removes mol_idx, recomputes E_current |
 | `CommitMove(ads_comp, mol_idx)` | Commit accepted translation/rotation/reinsertion; server updates mol_idx position, recomputes E_current |
-| `SyncFull(ads_comp, n_mol, full_molsize, host_positions, consider_atom)` | Full configuration resync: send all N molecules for a component; server replaces stored config, recomputes E_current |
+| `SyncFull(ads_comp, n_mol, full_molsize, host_positions, consider_atom)` | Full configuration resync: send all N molecules for a component; server replaces stored config, recomputes E_current. **Returns raw energy (eV)** so volume-move callers can use it for ΔE without a separate `QueryTotal`. |
 | `QueryTotal(DNNEnergyConversion)` | Return `E_current − E_fw_cached` in internal units (used for FxnMain total-energy check) |
+| `ScaleCellBy(scale)` | Multiply all 9 elements of `UCBox.Cell` by `scale` and recompute `UCBox.InverseCell`. Call before `SyncFull` after a Gibbs volume move to keep the socket client's cell in sync with the simulation box. |
 
 **Legacy methods (kept for startup validation):**
 
@@ -375,6 +376,22 @@ Commit patches fire on acceptance, after GPU arrays are updated:
 |-----------------|-----------|--------------|
 | `ReinsertionMove::Acceptance` | `PATCH_SOCKET_COMMIT_REINSERTION` | `cudaMemcpy` accepted pos → `CommitMove(comp, mol_idx)` |
 
+### `mc_box.h`
+
+`NVTGibbsMove` is patched at three points. Gibbs particle transfers use the same GCMC
+insertion/deletion patch chain and require no additional changes here.
+
+| Location | Patch Name | What it does |
+|----------|-----------|--------------|
+| After classical energy loop | `PATCH_SOCKET_GIBBS_VOL_DNN_TRIAL` | Save old positions (GPU first half → host). Call `ScaleCellBy(ScaleAB[sim])`. Call `SyncFull` with new scaled positions (GPU second half). Store `E_new_dnn * DNNEnergyConversion` in `NewE[sim].DNN_E`; call `DNN_Replace_Energy`. |
+| Accept branch, after Eik swap | `PATCH_SOCKET_GIBBS_VOL_DNN_ACCEPT` | Copy accepted scaled positions from GPU → `HostSystem[comp].pos` so future `SyncFull` calls (e.g. on next rejection restore) have accurate host-side data. |
+| Reject branch, after `Revert_Boxsize` | `PATCH_SOCKET_GIBBS_VOL_DNN_REJECT` | Call `ScaleCellBy(1.0/ScaleAB[sim])` to undo cell scale. Call `SyncFull` with saved old positions to restore server state. |
+
+**Key invariant:** After any volume-move outcome (accept or reject), the server's stored
+cell (`UCBox.Cell`) and `ads_config` must match gRASPA's current simulation box and atom
+positions exactly. `ScaleCellBy` keeps the cell in sync; `SyncFull` keeps `ads_config`
+in sync.
+
 ### `fxn_main.h`
 - **Lines ~341-346:** `DNN_Prediction_Total()` called during `Check_Simulation_Energy()`
 - **Lines ~491-500:** Reports DNN energy, stored classical HG energy, and the correction
@@ -413,6 +430,14 @@ The codebase uses a text-marker patching approach. Each marker in `src_clean` co
 | `###PATCH_SOCKET_COMMIT_INSERT###` | `PATCH_SOCKET_mc_utilities.h.txt` | `mc_utilities.h` |
 | `###PATCH_SOCKET_COMMIT_DELETE###` | `PATCH_SOCKET_mc_utilities.h.txt` | `mc_utilities.h` |
 | `###PATCH_SOCKET_COMMIT_REINSERTION###` | `PATCH_SOCKET_move_struct.h.txt` | `move_struct.h` |
+
+**Gibbs volume move patches:**
+
+| Marker in `src_clean` | Patch File | Target File |
+|-----------------------|-----------|-------------|
+| `###PATCH_SOCKET_GIBBS_VOL_DNN_TRIAL###` | `PATCH_SOCKET_mc_box.h.txt` *(new)* | `mc_box.h` |
+| `###PATCH_SOCKET_GIBBS_VOL_DNN_ACCEPT###` | `PATCH_SOCKET_mc_box.h.txt` *(new)* | `mc_box.h` |
+| `###PATCH_SOCKET_GIBBS_VOL_DNN_REJECT###` | `PATCH_SOCKET_mc_box.h.txt` *(new)* | `mc_box.h` |
 
 **Patch file naming convention:** `PATCH_SOCKET_<source_filename>.txt`. `patch.py` strips
 the `PATCH_SOCKET_` prefix to determine the target source file. Multiple patch sections
@@ -510,6 +535,14 @@ prime `ads_config` and bring `E_current` up to `E(fw + initial_ads)`.
 | Deletion (CBMC/single) | 1 | 0 (reuses pending) | 1 / 1 |
 | Reinsertion | 1 | 0 (reuses pending) | 1 / 1 |
 | Total energy (FxnMain) | 1 (QUERY_TOTAL) | — | 1 |
+| NVTGibbsMove (volume) | 2 × SyncFull (trial) | 0 (server already updated) | 2 / 2 |
+
+For `NVTGibbsMove`: one `SyncFull` per box on the trial step (cell scaled, new positions
+sent), and one `SyncFull` per box on rejection (cell unscaled, old positions restored).
+On acceptance the server already has the correct trial state from the trial `SyncFull`
+calls, so no additional socket calls are needed. `E_old` is read from `deltaE.DNN_E`
+(accumulated from accepted moves) rather than fetched from the server, avoiding an
+extra `QueryTotal` round-trip per volume move.
 
 Each DELTA_QUERY triggers two MACE forward passes on the server: one for the full system (`E_full`) and one for the adsorbates alone (`E_ads`). This is necessary to isolate the HG interaction energy (see Section 17.3). On acceptance, the COMMIT message reuses the energies already computed during the DELTA_QUERY, so no additional forward passes are required.
 
@@ -821,6 +854,25 @@ Each of the INSERTION, DELETION, SINGLE, and REINSERTION patch blocks allocates 
 
 ### Correctness and Flexibility
 
+**C0. `NVTGibbsMove` DNN energy reference mismatch when a real framework is present.**
+`SyncFull` returns `E_current − E_fw_cached` (HG-only energy), while `QueryTotal`
+returns `E_current` (absolute). In `NVTGibbsMove`, `NewE[sim].DNN_E` is set from the
+`SyncFull` return value, but `CurrentE[sim].DNN_E` is built from `CreateMol_Energy +
+deltaE`, where `CreateMol_Energy.DNN_E` was initialized via `QueryTotal`. When
+`E_fw ≠ 0` this creates a systematic offset of `E_fw × DNNEnergyConversion` in
+`DeltaE.DNN_E`, which corrupts the Gibbs volume-move acceptance criterion.
+
+**Not a problem for empty-box GEMC** (e.g. pure-fluid VLE with no solid framework):
+`E_fw = 0` so both calls return the same value and the implementation is correct.
+
+**Fix (if running GEMC with a real framework):** Either (a) change `SYNC_FULL` in the
+Python server to return `E_current` instead of `E_current − cached_E_fw`, making it
+consistent with `QUERY_TOTAL`; or (b) cache `E_fw` in the `Socket` struct at startup
+(from the `PrimeFrameworkCache` return value) and add it back to the `SyncFull` return
+inside the volume-move patch before assigning to `NewE[sim].DNN_E`.
+- File: `ase_ipi_server_uma_pure.py` line 473 (`SYNC_FULL` handler, returns `E_current - cached_E_fw`);
+  `socket-patch/Socket/PATCH_SOCKET_mc_box.h.txt` `PATCH_SOCKET_GIBBS_VOL_DNN_TRIAL` section.
+
 **C1. `ConsiderThisAdsorbateAtom` is a single shared array applied to all adsorbate components.**
 `CopyAtomsFromFirstUnitcell()` and all patch blocks use a single `ConsiderThisAdsorbateAtom` boolean array. In `read_data.cpp`, this pointer is overwritten (and the previous allocation leaked) every time a new `DNNPseudoAtoms` line is parsed. Furthermore, it is allocated based on the `Moleculesize` of the first guest component; if a subsequent component is larger, the parsing loop will trigger an out-of-bounds memory write. Each adsorbate component should have its own independently allocated filter array.
 - File: `src_clean/read_data.cpp`, line 2314; `src_clean/ase_energy_client.h`, line 594.
@@ -851,6 +903,22 @@ The `cache_valid` flag in `Socket` is set to `true` after the first `E_framework
 ## 16. Changelog
 
 All changes are listed in reverse chronological order (most recent first). Items marked **[PENDING]** are included in this release but may require further testing or validation.
+
+---
+
+### Gibbs ensemble volume move DNN support
+
+**Date:** 2026-04-07
+**Files:** `src_clean/ase_energy_client.h`, `src_clean/mc_box.h`,
+`socket-patch/Socket/PATCH_SOCKET_mc_box.h.txt` *(new)*,
+`patch_Socket/mc_box.h`, `patch_Socket/ase_energy_client.h`
+
+Extended the socket DNN path to cover Gibbs ensemble volume moves (`NVTGibbsMove`).
+Three patch markers added to `src_clean/mc_box.h` in `NVTGibbsMove`; corresponding
+patch content created in `PATCH_SOCKET_mc_box.h.txt`. `SyncFull` return type changed
+`void → double`; new `ScaleCellBy` method added. See Section 6 (`mc_box.h`) for
+the full per-marker breakdown and Section 9 (per-move cost table) for socket call
+accounting. See CHANGELOG.md for full rationale and design notes.
 
 ---
 

@@ -1316,11 +1316,8 @@ MoveEnergy Ewald_TotalEnergy(Simulations& Sim, Components& SystemComponents, boo
       //cudaFree(&Box.tempEik);
       //cudaFree(&Box.tempFrameworkEik);
       Complex* TEMP; Complex* TEMP_F;
-       
       cudaMalloc(&TEMP,   SystemComponents.tempEikAllocateSize * sizeof(Complex));
       cudaMalloc(&TEMP_F, SystemComponents.tempEikAllocateSize * sizeof(Complex));
-      //cudaMalloc(&Box.tempEik,          SystemComponents.tempEikAllocateSize * sizeof(Complex));
-      //cudaMalloc(&Box.tempFrameworkEik, SystemComponents.tempEikAllocateSize * sizeof(Complex));
       std::swap(TEMP,   Sim.Box.tempEik);
       std::swap(TEMP_F, Sim.Box.tempFrameworkEik);
       cudaFree(TEMP);
@@ -1341,7 +1338,6 @@ MoveEnergy Ewald_TotalEnergy(Simulations& Sim, Components& SystemComponents, boo
 
     //TotalFourierEwald<<<Nblock, Nthread, Nthread * sizeof(double)>>>(d_a, Box, Sim.Blocksum, eikx, eiky, eikz, Box.tempFrameworkEik, Box.tempEik, NTotalAtom, NAtomPerThread, residueAtoms, NHostGuestthread, SystemComponents.NComponents, Nblock);
     TotalFourierEwald<<<Nblock, Nthread>>>(d_a, Box, Sim.Blocksum, eikx, eiky, eikz, Box.tempFrameworkEik, Box.tempEik, NTotalAtom, NAtomPerThread, residueAtoms, NHostGuestthread, SystemComponents.NComponents, Nblock);
-    checkCUDAErrorEwald("Error in Total Ewald Summation\n");
     cudaFree(eikx); cudaFree(eiky); cudaFree(eikz);
    
     //Sometimes kpoints exceed the size of blocksum, so need to reduce it//
@@ -1357,9 +1353,7 @@ MoveEnergy Ewald_TotalEnergy(Simulations& Sim, Components& SystemComponents, boo
       if(Nblock % kpoint_per_thread != 0) NCudaBlock++;
       COUNT++;
     }
-    //printf("Sim.Nblocks: %zu, total kpoints: %zu, CUDAblock: %zu, each thread do %zu kpoints\n", Sim.Nblocks, Nblock, NCudaBlock, kpoint_per_thread);
     TotalFourierEwald_CalculateEnergy<<<NCudaBlock, 128, 128*3*sizeof(double)>>>(Box, Box.tempFrameworkEik, Box.tempEik, Sim.Blocksum, Nblock, kpoint_per_thread, NCudaBlock);
-    checkCUDAErrorEwald("Error in summing the energies of fourier part\n");
 
     double HostTotEwald[NCudaBlock*3]; //HH + HG + GG//
     double HHFourier = 0.0;

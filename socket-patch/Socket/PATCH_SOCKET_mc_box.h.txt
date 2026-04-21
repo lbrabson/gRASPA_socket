@@ -1,0 +1,102 @@
+PATCH_SOCKET_GIBBS_VOL_DNN_TRIAL
+  // Per-box, per-component host copy of old positions needed to restore
+  // server state if the trial is rejected.
+  struct BoxCompPos { size_t comp; std::vector<double3> pos; };
+  std::vector<std::vector<BoxCompPos>> dnn_old_pos(NBox);
+  double E_new_dnn[2] = {0.0, 0.0};
+
+  bool use_dnn_vol = false;
+  for(size_t sim = 0; sim < NBox; sim++)
+    if(SystemComponents[sim].UseSocket) { use_dnn_vol = true; break; }
+
+  if(use_dnn_vol && !Overlap)
+  {
+    for(size_t sim = 0; sim < NBox; sim++)
+    {
+      if(!SystemComponents[sim].UseSocket) continue;
+      const size_t n_comp = SystemComponents[sim].NComponents.x;
+
+      // Copy Atoms struct headers from GPU so we can access device pos pointers
+      std::vector<Atoms> h_atoms(n_comp);
+      cudaMemcpy(h_atoms.data(), Sims[sim].d_a,
+                 n_comp * sizeof(Atoms), cudaMemcpyDeviceToHost);
+
+      // Update socket client's cell to the new (scaled) simulation box
+      SystemComponents[sim].DNN.ScaleCellBy(ScaleAB[sim]);
+
+      // For each adsorbate component: save old positions (GPU first half) and
+      // call SyncFull with the new scaled positions (GPU second half).
+      for(size_t comp = 1; comp < n_comp; comp++)
+      {
+        size_t n_mol    = SystemComponents[sim].NumberOfMolecule_for_Component[comp];
+        if(n_mol == 0) continue;
+        size_t mol_size = SystemComponents[sim].Moleculesize[comp];
+        size_t n_atoms  = n_mol * mol_size;
+        size_t half     = SystemComponents[sim].Allocate_size[comp] / 2;
+
+        // Save old positions (GPU first half → host) for rejection restore
+        BoxCompPos bcp;
+        bcp.comp = comp;
+        bcp.pos.resize(n_atoms);
+        cudaMemcpy(bcp.pos.data(), h_atoms[comp].pos,
+                   n_atoms * sizeof(double3), cudaMemcpyDeviceToHost);
+        dnn_old_pos[sim].push_back(std::move(bcp));
+
+        // Copy new scaled positions (GPU second half → host)
+        std::vector<double3> new_pos(n_atoms);
+        cudaMemcpy(new_pos.data(), h_atoms[comp].pos + half,
+                   n_atoms * sizeof(double3), cudaMemcpyDeviceToHost);
+
+        // SyncFull updates the server with the trial config and returns
+        // E(all molecules in new cell) - E_fw  (in eV).
+        // For multi-component systems the last call reflects the full system.
+        E_new_dnn[sim] = SystemComponents[sim].DNN.SyncFull(
+            comp, n_mol, mol_size,
+            new_pos.data(),
+            SystemComponents[sim].ConsiderThisAdsorbateAtom);
+      }
+
+      // Store DNN absolute energy in NewE so DeltaE = NewE - CurrentE is correct.
+      // DNN_Replace_Energy zeros the classical HG terms when UsePureDNN is true.
+      NewE[sim].DNN_E = E_new_dnn[sim] * SystemComponents[sim].DNNEnergyConversion;
+      NewE[sim].DNN_Replace_Energy(SystemComponents[sim].UsePureDNN);
+    }
+  }
+
+PATCH_SOCKET_GIBBS_VOL_DNN_ACCEPT
+      // DNN: server E_current is already correct from the trial SyncFull.
+      // Update HostSystem with the accepted scaled positions so future
+      // rejection-restore SyncFull calls have accurate host-side data.
+      if(use_dnn_vol && SystemComponents[sim].UseSocket)
+      {
+        const size_t n_comp = SystemComponents[sim].NComponents.x;
+        std::vector<Atoms> h_atoms_acc(n_comp);
+        cudaMemcpy(h_atoms_acc.data(), Sims[sim].d_a,
+                   n_comp * sizeof(Atoms), cudaMemcpyDeviceToHost);
+        for(size_t comp = 1; comp < n_comp; comp++)
+        {
+          size_t n_mol   = SystemComponents[sim].NumberOfMolecule_for_Component[comp];
+          size_t n_atoms = n_mol * SystemComponents[sim].Moleculesize[comp];
+          if(n_atoms == 0) continue;
+          cudaMemcpy(SystemComponents[sim].HostSystem[comp].pos,
+                     h_atoms_acc[comp].pos,
+                     n_atoms * sizeof(double3), cudaMemcpyDeviceToHost);
+        }
+      }
+
+PATCH_SOCKET_GIBBS_VOL_DNN_REJECT
+      // DNN: undo cell scale in socket client and restore server to old config
+      if(use_dnn_vol && SystemComponents[sim].UseSocket)
+      {
+        SystemComponents[sim].DNN.ScaleCellBy(1.0 / ScaleAB[sim]);
+        for(auto& bcp : dnn_old_pos[sim])
+        {
+          size_t n_mol = SystemComponents[sim].NumberOfMolecule_for_Component[bcp.comp];
+          SystemComponents[sim].DNN.SyncFull(
+              bcp.comp, n_mol,
+              SystemComponents[sim].Moleculesize[bcp.comp],
+              bcp.pos.data(),
+              SystemComponents[sim].ConsiderThisAdsorbateAtom);
+        }
+      }
+

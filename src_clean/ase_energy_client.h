@@ -615,10 +615,10 @@ struct Socket
        host_positions : HostSystem[ads_comp].pos  (all N molecules concatenated)
        full_molsize   : Moleculesize[ads_comp]     (including fictional charge sites)
        consider_atom  : ConsiderThisAdsorbateAtom  (length = full_molsize) */
-    void SyncFull(size_t ads_comp, size_t n_mol, size_t full_molsize,
-                  double3* host_positions, bool* consider_atom)
+    double SyncFull(size_t ads_comp, size_t n_mol, size_t full_molsize,
+                    double3* host_positions, bool* consider_atom)
     {
-        if (n_mol == 0) return;
+        if (n_mol == 0) return 0.0;
 
         size_t mol_size = UCAtoms[ads_comp].size;
         size_t n_total  = n_mol * mol_size;
@@ -640,13 +640,13 @@ struct Socket
                 type_i++;
             }
         }
-        printf("[SYNC_FULL] comp=%zu n_mol=%zu total_atoms=%zu\n",
-               ads_comp, n_mol, n_total);
         double _t0 = omp_get_wtime();
-        PredictFromSocketExtended(xyz.data(), types.data(), n_total,
-                                  (int32_t)SYNC_FULL, (int32_t)n_mol, (int32_t)ads_comp);
+        double E_ev = PredictFromSocketExtended(xyz.data(), types.data(), n_total,
+                                                (int32_t)SYNC_FULL, (int32_t)n_mol,
+                                                (int32_t)ads_comp);
         t_sync_full += omp_get_wtime() - _t0;
         n_sync_full++;
+        return E_ev;
     }
 
     /* QueryTotal — return E_current - E_fw_cached (= total HG energy with all ads).
@@ -816,6 +816,15 @@ struct Socket
         inverse_matrix(UCBox.Cell, &UCBox.InverseCell);
     }
 
+    /* ScaleCellBy — uniformly scale the unit-cell matrix by `scale` and update
+       the inverse.  Call before SyncFull when the simulation box volume changes
+       (e.g. Gibbs ensemble volume moves). */
+    void ScaleCellBy(double scale)
+    {
+        for (int i = 0; i < 9; i++) UCBox.Cell[i] *= scale;
+        inverse_matrix(UCBox.Cell, &UCBox.InverseCell);
+    }
+
     //Assuming the framework atoms are reproduced, and the order of atoms in a unit cell matches the order in the cif//
     //This assumes rigid framework//
     //Since it is framework (assuming all the atoms are DNN-used, consider them all)
@@ -826,6 +835,12 @@ struct Socket
     void CopyAtomsFromFirstUnitcell(Atoms& HostAtoms, size_t comp, int3 NSupercell, PseudoAtomDefinitions& PseudoAtoms, bool* ConsiderThisAdsorbateAtom)
     {
         size_t NAtoms = HostAtoms.Molsize / (NSupercell.x * NSupercell.y * NSupercell.z);
+        if(NAtoms == 0)  // empty framework (e.g. Empty-Box) — nothing to copy
+        {
+            UCAtoms[comp].size = 0;
+            AllocateUCSpace(comp);
+            return;
+        }
         if(HostAtoms.size % NAtoms != 0) throw std::runtime_error("SuperCell size cannot be divided by number of supercell atoms!!!!");
         UCAtoms[comp].size = NAtoms;
         //During the initialization phase, for adsorbate atoms, exclude those that are NOT considered in DNN.
