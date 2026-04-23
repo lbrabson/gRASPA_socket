@@ -255,19 +255,18 @@ Variables Initialize(void) //for pybind
     cudaMalloc(&Vars.Sims[a].d_a, sizeof(Atoms)*NComponents.x);
     InitializeMaxTranslationRotation(Vars.SystemComponents[a]);
     //Read initial configurations either from restart file or from lammps data file//
-    if(RunSingleSim)
+    //Gibbs ensemble (RunSingleSim=false) also reads restart for each box using System_{a}/restartfile//
+    bool doReadRestart = ReadRestart && (RunSingleSim ? (a == SelectedSim) : true);
+    if(doReadRestart)
     {
-      if(a == SelectedSim && ReadRestart)
-      { 
-        ReadRestartInputFileType(Vars.SystemComponents[a]);
-        if(Vars.SystemComponents[a].RestartInputFileType == RASPA_RESTART) 
-        {
-          RestartFileParser(Vars.Box[a], Vars.SystemComponents[a]); AlreadyHasFractionalMolecule = true;
-        }
-        else if(Vars.SystemComponents[a].RestartInputFileType == LAMMPS_DATA)
-        {
-          LMPDataFileParser(Vars.Box[a], Vars.SystemComponents[a]);
-        }
+      ReadRestartInputFileType(Vars.SystemComponents[a]);
+      if(Vars.SystemComponents[a].RestartInputFileType == RASPA_RESTART)
+      {
+        RestartFileParser(Vars.Box[a], Vars.SystemComponents[a], a); AlreadyHasFractionalMolecule = true;
+      }
+      else if(Vars.SystemComponents[a].RestartInputFileType == LAMMPS_DATA)
+      {
+        LMPDataFileParser(Vars.Box[a], Vars.SystemComponents[a]);
       }
     }
     //Zhao's note: move copying cell information to GPU after reading restart

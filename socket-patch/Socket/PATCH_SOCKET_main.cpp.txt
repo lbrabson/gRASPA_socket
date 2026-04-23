@@ -59,6 +59,15 @@ PATCH_SOCKET_MAIN_PREP
         for(size_t comp = 1; comp < Vars.SystemComponents[a].NComponents.x; comp++)
           Vars.SystemComponents[a].DNN.WrapSuperCellAtomIntoUCBox(comp); // adsorbate templates
 
+        // Use box-specific socket path if provided (GRASPA_SOCKET_PATH_0, _1, ...)
+        // falling back to GRASPA_SOCKET_PATH for single-box or legacy runs.
+        {
+          std::string env_key = "GRASPA_SOCKET_PATH_" + std::to_string(a);
+          const char* box_path = std::getenv(env_key.c_str());
+          if(!box_path) box_path = std::getenv("GRASPA_SOCKET_PATH");
+          if(box_path) Vars.SystemComponents[a].DNN.init(box_path, 0);
+        }
+
         // Connect: handshake + species map + framework cache priming
         if(Vars.SystemComponents[a].DNN.connect_socket() < 0)
           throw std::runtime_error("Failed to connect to ML server socket");

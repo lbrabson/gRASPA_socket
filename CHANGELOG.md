@@ -1,5 +1,114 @@
 # Changelog
 
+## 2026-04-22 — Fix: SIGFPE and SIGSEGV during socket init with empty-box (GEMC) framework
+
+**Summary:** Two zero-atom guards added to the socket client initialization path, fixing
+crashes that occurred when running GEMC simulations where the framework component is an
+empty box (no atoms).
+
+1. `CopyAtomsFromFirstUnitcell` computed `HostAtoms.size % NAtoms` where `NAtoms` was
+   derived from `HostAtoms.Molsize / denom`. For an empty-box framework `Molsize == 0`,
+   giving `NAtoms == 0`, and the modulo caused a SIGFPE (integer modulo-by-zero).
+
+2. `PrimeFrameworkCache` unconditionally printed `UCAtoms[0].pos[0]` regardless of
+   `n_fw`. Because the early return added in fix 1 skips `AllocateUCSpace`, `UCAtoms[0].pos`
+   is uninitialized when `n_fw == 0`, so the dereference caused a SIGSEGV. The printf is
+   now guarded by `if(n_fw > 0)`. The subsequent `PredictFromSocket` call with `n_fw == 0`
+   is still made so the server receives the expected `FRAMEWORK_PRIME` exchange and caches
+   `E_fw = 0.0`.
+
+**Files changed:**
+
+- `src_clean/ase_energy_client.h` `CopyAtomsFromFirstUnitcell` — early return when
+  `denom == 0 || HostAtoms.Molsize == 0`, setting `UCAtoms[comp].size = 0`
+- `src_clean/ase_energy_client.h` `PrimeFrameworkCache` — guard on `n_fw > 0` before
+  printing first-atom coordinates
+
+---
+
+## 2026-04-22 — Enable restarts of a simulation with two boxes; handle two socket paths simultaneously
+
+**Summary:** Socket preparation is edited to enable using separate socket paths for different
+simulation boxes and to allow for simultaneous restarting of multiple simulation boxes
+
+**Files changed:**
+
+- `socket_patch/PATCH_SOCKET_main.cpp` (line 62) — read user-specified socket path from env variables
+- `src_clean/main.cpp` (line 260) — restart box of a specific simulation when one command 
+file runs several sims
+- `src_clean/read_data.cpp` (line 2814) — edit filename of Restart file to 
+account for sim ID
+- `src_clean/read_data.h` (line 40) — update `RestartFileParser` class declaration
+to include number of simulation boxes
+
+---
+
+## 2026-04-07 — Fix: zero tail correction when `UsePureDNN yes`
+
+**Summary:** `DNN_Replace_Energy()` in `MoveEnergy` now zeroes `TailE` when
+`UsePureDNN` is true. Previously, when all classical host-guest, host-host, and
+guest-guest terms were zeroed, the tail correction (a classical long-range VDW
+correction) was left non-zero. For a pure-DNN simulation the tail correction is
+physically wrong — the MLIP already captures all long-range interactions — so
+retaining it double-counted a classical correction against a fully ML-computed energy.
+
+**Files changed:**
+
+- `src_clean/data_struct.h` (line 492) — added `TailE = 0.0;` inside the
+  `if(UsePureDNN)` block of `DNN_Replace_Energy()`
+- `patch_Socket/data_struct.h` (line 494) — same change (kept in sync)
+
+---
+
+## 2026-03-12 — Add pure DNN mode (`UsePureDNN`)
+
+**Summary:** Added a `UsePureDNN yes` simulation input option that lets the MLIP handle all interatomic interactions (host–host, host–guest, and guest–guest) without any classical force-field contribution. Previously `DNN_Replace_Energy` only zeroed the host–guest classical terms; with `UsePureDNN`, the host–host and guest–guest VDW, Real, and Ewald terms are zeroed as well.
+
+**New keyword:** `UsePureDNN yes` in the DNN model setup block of `simulation.input`.
+
+**Files changed:**
+
+- `src_clean/data_struct.h` — `DNN_Replace_Energy()` gains a `bool UsePureDNN = false` argument; when `true`, additionally zeroes `HHVDW`, `HHReal`, `HHEwaldE`, `GGVDW`, `GGReal`, `GGEwaldE`. Added `bool UsePureDNN = false` field to `Components` struct.
+- `src_clean/read_data.cpp` — Parses `UsePureDNN yes` in `ReadDNNModelSetup`.
+- `src_clean/main.cpp` — Propagates `UsePureDNN` flag when copying component settings across simulation boxes.
+- `src_clean/mc_swap_utilities.h` — `Insertion_Body` and `Deletion_Body` pass `SystemComponents.UsePureDNN` to `DNN_Replace_Energy`.
+- `ase_ipi_server_mace_pure_dnn.py` *(new file)* — Alternative server variant for pure DNN mode. Returns `[E(fw+trial) − E_isolated_mol] − E_current` for insertions and `[E(fw+trial) + E_isolated_mol] − E_current` for deletions, so that guest–guest interactions are fully captured by the MLIP. Mirrors the protocol and state machine of `ase_ipi_server_mace.py` but subtracts an isolated-molecule self-energy on each delta query.
+
+---
+
+## 2026-03-11 — Add debug mode to print constituent energies
+
+**Summary:** Added a `DebugMode yes` simulation input option that prints a per-move breakdown of all energy components before and after `DNN_Replace_Energy`, useful for diagnosing socket energy issues.
+
+**New keyword:** `DebugMode yes` in the DNN model setup block of `simulation.input`.
+
+**Files changed:**
+
+- `src_clean/data_struct.h` — Added `bool DebugMode = false` field to `Components`.
+- `src_clean/read_data.cpp` — Parses `DebugMode yes` in `ReadDNNModelSetup`.
+- `src_clean/main.cpp` — Propagates `DebugMode` flag when copying component settings.
+- `src_clean/mc_single_particle.h` — When debug mode is active, prints HH/HG/GG VDW, Real, Ewald, `DNN_E`, `preFactor`, `Beta`, `TailE`, and total energy for translation/rotation moves both before and after `DNN_Replace_Energy`.
+- `src_clean/mc_swap_utilities.h` — Same per-component printout for insertion and deletion moves.
+
+---
+
+## 2026-03-05 — Fix: massless-site support in many-body socket patch
+
+**Summary:** Pseudo-atoms with zero mass (e.g. TIP4P M-site charge site) are now excluded from the atom list sent over the socket. Previously, all adsorbate atoms were forwarded regardless of mass, causing the server to receive unphysical massless-site positions that the MLIP cannot handle.
+
+**Root cause:** `Match_Element_PseudoAtom_with_model()` tried to match every pseudo-atom symbol — including massless virtual sites — against the MLIP's element list. The default "pass all atoms" path in `main.cpp` also included them without checking mass.
+
+**Files changed:**
+
+- `src_clean/ase_energy_client.h`
+  - `Match_Element_PseudoAtom_with_model()`: skips pseudo-atoms whose `PseudoAtoms.mass[i] <= 0.0` (logs a `massless, skipping` message instead of attempting to match).
+- `src_clean/main.cpp`
+  - Default `ConsiderThisAdsorbateAtom` initialisation (no `DNNPseudoAtoms` keyword) now checks `PseudoAtoms.mass[pseudoAtomType] > 0.0` per atom-site; massless sites receive `false`.
+- `socket-patch/Socket/PATCH_SOCKET_main.cpp.txt`
+  - Element symbol list built for the socket now filters out symbols that have no mass-bearing pseudo-atom entry, preventing massless species from appearing in the type map sent to the server.
+
+---
+
 ## 2026-03-04 — Auto-generate socket name; propagate via `GRASPA_SOCKET_PATH`
 
 **Summary:** The UNIX socket path is now auto-generated per run, eliminating manual

@@ -193,9 +193,10 @@ struct Socket
 
         printf("[PrimeFW] n_fw=%zu\n", n_fw);
         printf("[PrimeFW] cell diag: %f %f %f\n", UCBox.Cell[0], UCBox.Cell[4], UCBox.Cell[8]);
-        printf("[PrimeFW] first atom xyz: %f %f %f type=%zu\n",
-            UCAtoms[0].pos[0].x, UCAtoms[0].pos[0].y, UCAtoms[0].pos[0].z,
-            UCAtoms[0].Type[0]);
+        if(n_fw > 0)
+            printf("[PrimeFW] first atom xyz: %f %f %f type=%zu\n",
+                UCAtoms[0].pos[0].x, UCAtoms[0].pos[0].y, UCAtoms[0].pos[0].z,
+                UCAtoms[0].Type[0]);
         fflush(stdout);
 
         std::vector<double>  xyz_fw(3 * n_fw);
@@ -825,7 +826,9 @@ struct Socket
     //TIP4P HostAtoms.Molsize = 4, here we want UCAtoms.size = 3//
     void CopyAtomsFromFirstUnitcell(Atoms& HostAtoms, size_t comp, int3 NSupercell, PseudoAtomDefinitions& PseudoAtoms, bool* ConsiderThisAdsorbateAtom)
     {
-        size_t NAtoms = HostAtoms.Molsize / (NSupercell.x * NSupercell.y * NSupercell.z);
+        size_t denom = (size_t)NSupercell.x * NSupercell.y * NSupercell.z;
+        if(denom == 0 || HostAtoms.Molsize == 0) { UCAtoms[comp].size = 0; return; } // empty-box framework
+        size_t NAtoms = HostAtoms.Molsize / denom;
         if(HostAtoms.size % NAtoms != 0) throw std::runtime_error("SuperCell size cannot be divided by number of supercell atoms!!!!");
         UCAtoms[comp].size = NAtoms;
         //During the initialization phase, for adsorbate atoms, exclude those that are NOT considered in DNN.
