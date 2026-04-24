@@ -414,6 +414,48 @@ void NVTGibbsMove(std::vector<Components>& SystemComponents, Simulations*& Sims,
       NewE[sim].TailE = TotalTailCorrection(SystemComponents[sim], FF.size, Sims[sim].Box.Volume);
     }
   }
+  // -----------------------------------------------------------------------
+  // DNN volume move energy (UsePureDNN + UseSocket only).
+  // Query each box's server for E(trial) - E_current at the scaled positions.
+  // Results are stored per-box and applied via DNN_Replace_Energy inside the
+  // acceptance block, matching the pattern used for all other move types.
+  // -----------------------------------------------------------------------
+  double DNN_dE[2]       = {0.0, 0.0};
+  bool   DNN_volume_computed = false;
+  if(!Overlap && SystemComponents[SelectedBox].UsePureDNN && SystemComponents[SelectedBox].UseSocket)
+  {
+    DNN_volume_computed = true;
+    cudaDeviceSynchronize();
+    for(size_t sim = 0; sim < NBox; sim++)
+    {
+      // new cell = old UCBox.Cell scaled isotropically by ScaleAB[sim]
+      double new_cell[9];
+      for(int k = 0; k < 9; k++)
+        new_cell[k] = SystemComponents[sim].DNN.UCBox.Cell[k] * ScaleAB[sim];
+
+      for(size_t comp = 1; comp < SystemComponents[sim].NComponents.x; comp++)
+      {
+        size_t n_mol   = SystemComponents[sim].NumberOfMolecule_for_Component[comp];
+        size_t molsize = SystemComponents[sim].Moleculesize[comp];
+        if(n_mol == 0) continue;
+
+        // Scaled positions live in the second half of the device array
+        Atoms comp_dev;
+        cudaMemcpy(&comp_dev, &Sims[sim].d_a[comp], sizeof(Atoms), cudaMemcpyDeviceToHost);
+        double3* host_buf = new double3[n_mol * molsize];
+        cudaMemcpy(host_buf, comp_dev.pos + comp_dev.Allocate_size / 2,
+                   n_mol * molsize * sizeof(double3), cudaMemcpyDeviceToHost);
+
+        DNN_dE[sim] += SystemComponents[sim].DNN.QueryVolume(
+            comp, n_mol, molsize, host_buf,
+            SystemComponents[sim].ConsiderThisAdsorbateAtom,
+            new_cell, SystemComponents[sim].DNNEnergyConversion);
+
+        delete[] host_buf;
+      }
+    }
+  }
+
   //If the Gibbs Volume Move is Accepted, for the test, assume it is always accepted//
   bool Accept = false;
   if(!Overlap)
@@ -425,19 +467,47 @@ void NVTGibbsMove(std::vector<Components>& SystemComponents, Simulations*& Sims,
 
     DeltaE[SelectedBox] = NewE[SelectedBox] - CurrentE[SelectedBox];
     DeltaE[OtherBox]    = NewE[OtherBox]    - CurrentE[OtherBox];
+
+    // Replace classical ΔE with DNN ΔE — same pattern as insertion/deletion
+    if(DNN_volume_computed)
+    {
+      for(size_t sim = 0; sim < NBox; sim++)
+      {
+        DeltaE[sim].DNN_E = DNN_dE[sim];
+        DeltaE[sim].DNN_Replace_Energy(SystemComponents[sim].UsePureDNN);
+      }
+    }
+
     double VolumeRatioA= Sims[SelectedBox].Box.Volume / OldVA;
     double VolumeRatioB= Sims[OtherBox].Box.Volume    / OldVB;
 
-    //This assumes that the two boxes share the same temperature, it might not be true// 
+    //This assumes that the two boxes share the same temperature, it might not be true//
     double Pacc = std::exp(-SystemComponents[SelectedBox].Beta*(DeltaE[0].total()+DeltaE[1].total())+((NMolA+1.0)*std::log(VolumeRatioA))+((NMolB+1.0)*std::log(VolumeRatioB)));
     if(Get_Uniform_Random() < Pacc) Accept = true;
   }
- 
+
   if(Accept)
   {
     GibbsStatistics.GibbsBoxStats.y += 1;
     //Update Energy and positions//
-    
+
+    // DNN: commit volume move before copying GPU positions
+    if(DNN_volume_computed)
+    {
+      for(size_t sim = 0; sim < NBox; sim++)
+      {
+        double new_cell[9];
+        for(int k = 0; k < 9; k++)
+          new_cell[k] = SystemComponents[sim].DNN.UCBox.Cell[k] * ScaleAB[sim];
+        for(size_t comp = 1; comp < SystemComponents[sim].NComponents.x; comp++)
+        {
+          size_t n_mol = SystemComponents[sim].NumberOfMolecule_for_Component[comp];
+          if(n_mol == 0) continue;
+          SystemComponents[sim].DNN.CommitVolume(comp, n_mol, new_cell);
+        }
+      }
+    }
+
     for(size_t sim = 0; sim < NBox; sim++)
     {
       totMol = SystemComponents[sim].TotalNumberOfMolecules - SystemComponents[sim].NumberOfFrameworks;

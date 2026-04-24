@@ -30,6 +30,10 @@ enum ConfigType : int32_t {
     COMMIT_MOVE       = 302,   // update mol_idx position
     SYNC_FULL         = 303,   // full resync of one adsorbate component
 
+    // Volume move: mol_idx = ads_comp, n_mol = N molecules at new scaled positions
+    QUERY_VOLUME      = 400,   // trial full-config query at new cell (tentative)
+    COMMIT_VOLUME     = 401,   // commit accepted volume move (zero payload)
+
     // Total energy query (for Check_Simulation_Energy / DNN_Prediction_Total)
     QUERY_TOTAL       = 500,
 };
@@ -62,6 +66,8 @@ struct Socket
     double t_commit_delete  = 0.0;  size_t n_commit_delete  = 0;
     double t_query_total    = 0.0;  size_t n_query_total    = 0;
     double t_sync_full      = 0.0;  size_t n_sync_full      = 0;
+    double t_query_volume   = 0.0;  size_t n_query_volume   = 0;
+    double t_commit_volume  = 0.0;  size_t n_commit_volume  = 0;
 
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
@@ -664,10 +670,101 @@ struct Socket
         return E_ev * DNNEnergyConversion;
     }
 
+    /* Compute 3x3 matrix inverse in-place (no malloc).
+       Layout: row-major, x[row*3+col]. */
+    void compute_inverse_cell_inplace(double* cell, double* inv)
+    {
+        double m11=cell[0], m21=cell[3], m31=cell[6];
+        double m12=cell[1], m22=cell[4], m32=cell[7];
+        double m13=cell[2], m23=cell[5], m33=cell[8];
+        double det = m11*(m22*m33-m23*m32) - m12*(m21*m33-m23*m31) + m13*(m21*m32-m22*m31);
+        inv[0]=+(m22*m33-m32*m23)/det; inv[3]=-(m21*m33-m31*m23)/det; inv[6]=+(m21*m32-m31*m22)/det;
+        inv[1]=-(m12*m33-m32*m13)/det; inv[4]=+(m11*m33-m31*m13)/det; inv[7]=-(m11*m32-m31*m12)/det;
+        inv[2]=+(m12*m23-m22*m13)/det; inv[5]=-(m11*m23-m21*m13)/det; inv[8]=+(m11*m22-m21*m12)/det;
+    }
+
+    /* QueryVolume — trial full-configuration query at new (scaled) box volume.
+       Temporarily installs new_cell into UCBox so wrapping and wire format use
+       the correct cell; restores original cell on return (no server commit).
+
+       host_positions : all molecules of ads_comp at NEW scaled positions,
+                        laid out as [mol0_atom0, mol0_atom1, ..., mol1_atom0, ...]
+                        (full_molsize atoms per molecule, massless sites included)
+       new_cell       : 9-element row-major cell matrix after isotropic scaling
+
+       Returns ΔE = E(trial) - E_current in gRASPA internal units. */
+    double QueryVolume(size_t ads_comp, size_t n_mol, size_t full_molsize,
+                       double3* host_positions, bool* consider_atom,
+                       double* new_cell, double DNNEnergyConversion)
+    {
+        // Save current cell / inverse
+        double saved_cell[9], saved_inv[9];
+        memcpy(saved_cell, UCBox.Cell,        9 * sizeof(double));
+        memcpy(saved_inv,  UCBox.InverseCell, 9 * sizeof(double));
+
+        // Temporarily install new cell (for WrapPositionIntoUCBox + wire send)
+        memcpy(UCBox.Cell, new_cell, 9 * sizeof(double));
+        compute_inverse_cell_inplace(UCBox.Cell, UCBox.InverseCell);
+
+        size_t mol_size = UCAtoms[ads_comp].size;   // DNN-considered atoms per mol
+        size_t n_total  = n_mol * mol_size;
+        std::vector<double>  xyz(3 * n_total);
+        std::vector<int32_t> types(n_total);
+
+        size_t counter = 0;
+        for (size_t i = 0; i < n_mol; i++) {
+            size_t type_i = 0;
+            for (size_t j = 0; j < full_molsize; j++) {
+                if (!consider_atom[j]) continue;
+                double3 wrapped  = WrapPositionIntoUCBox(host_positions[i * full_molsize + j]);
+                xyz[3*counter+0] = wrapped.x;
+                xyz[3*counter+1] = wrapped.y;
+                xyz[3*counter+2] = wrapped.z;
+                types[counter]   = (int32_t)UCAtoms[ads_comp].Type[type_i];
+                counter++;
+                type_i++;
+            }
+        }
+
+        double _t0 = omp_get_wtime();
+        double E_ev = PredictFromSocketExtended(xyz.data(), types.data(), n_total,
+                                                (int32_t)QUERY_VOLUME,
+                                                (int32_t)n_mol, (int32_t)ads_comp);
+        t_query_volume += omp_get_wtime() - _t0;
+        n_query_volume++;
+
+        // Restore original cell
+        memcpy(UCBox.Cell,        saved_cell, 9 * sizeof(double));
+        memcpy(UCBox.InverseCell, saved_inv,  9 * sizeof(double));
+
+        return E_ev * DNNEnergyConversion;
+    }
+
+    /* CommitVolume — notify server that the volume move was accepted and
+       permanently update UCBox to the new cell.
+
+       Sends a zero-payload COMMIT_VOLUME message so the server can commit
+       the pending_volume_mols / pending_E it stored during QUERY_VOLUME.
+       new_cell must be the same cell passed to the preceding QueryVolume call. */
+    void CommitVolume(size_t ads_comp, size_t n_mol, double* new_cell)
+    {
+        // Permanently update client cell (must match what was sent in QueryVolume)
+        memcpy(UCBox.Cell, new_cell, 9 * sizeof(double));
+        compute_inverse_cell_inplace(UCBox.Cell, UCBox.InverseCell);
+
+        double _t0 = omp_get_wtime();
+        PredictFromSocketExtended(nullptr, nullptr, 0,
+                                  (int32_t)COMMIT_VOLUME,
+                                  (int32_t)n_mol, (int32_t)ads_comp);
+        t_commit_volume += omp_get_wtime() - _t0;
+        n_commit_volume++;
+    }
+
     void PrintTimingSummary(FILE* out) const {
         fprintf(out, "=== CLIENT-SIDE SOCKET TIMING SUMMARY ===\n");
         double total = t_query_delta + t_commit_insert + t_commit_move
-                     + t_commit_delete + t_query_total + t_sync_full;
+                     + t_commit_delete + t_query_total + t_sync_full
+                     + t_query_volume  + t_commit_volume;
         auto row = [&](const char* label, double t, size_t n) {
             if (n > 0)
                 fprintf(out, "  %-20s %8.3f s  %6zu calls  %8.3f ms/call\n",
@@ -679,6 +776,8 @@ struct Socket
         row("CommitDelete",  t_commit_delete, n_commit_delete);
         row("QueryTotal",    t_query_total,   n_query_total);
         row("SyncFull",      t_sync_full,     n_sync_full);
+        row("QueryVolume",   t_query_volume,  n_query_volume);
+        row("CommitVolume",  t_commit_volume, n_commit_volume);
         fprintf(out, "  %-20s %8.3f s\n", "TOTAL socket time", total);
         fprintf(out, "==========================================\n");
     }

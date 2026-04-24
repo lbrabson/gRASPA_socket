@@ -1,5 +1,76 @@
 # Changelog
 
+## 2026-04-23 — Fix: stale `HostSystem` positions passed to `SyncFull` after `CreateMolecule_InOneBox`
+
+**Summary:** When `CreateNumberOfMolecules > 0` (e.g. GEMC pre-filling boxes) and the socket
+DNN is active, `SyncFull` was called immediately after `CreateMolecule_InOneBox` using
+`HostSystem[comp].pos` (CPU), which had never been synced from the GPU. All molecule positions
+appeared at zero / uninitialized memory, so the ML server received a degenerate configuration
+and returned infinite energy. GCMC runs were unaffected because they start with
+`CreateNumberOfMolecules 0`, causing `SyncFull` to hit its `if(n_mol == 0) return` early exit.
+
+**Fix:** A `Copy_AtomData_from_Device` call is inserted in the `PATCH_SOCKET_POST_CREATEMOL`
+patch block immediately before the `SyncFull` loop, pulling all accepted GPU positions into
+`HostSystem[comp].pos` before they are read.
+
+**Files changed:**
+
+- `socket-patch/Socket/PATCH_SOCKET_main.cpp.txt` `PATCH_SOCKET_POST_CREATEMOL` — add
+  `Copy_AtomData_from_Device` call before the `SyncFull` loop
+
+---
+
+## 2026-04-23 — Feature: DNN-enabled Gibbs volume moves (`UsePureDNN` + socket)
+
+**Summary:** When `UsePureDNN yes` and `UseSocket` are both active, `NVTGibbsMove` now
+queries the ML server for the energy of the scaled configuration and uses the DNN ΔE in
+the acceptance criterion instead of the classical energy. The implementation uses two new
+protocol messages (`QUERY_VOLUME` / `COMMIT_VOLUME`) and does not rely on `SYNC_FULL`.
+
+**Protocol additions** (config_type values):
+- `QUERY_VOLUME = 400` — trial query: C++ sends all molecules of one adsorbate component
+  at their new (scaled) Cartesian positions plus the new cell matrix. Server computes
+  `E(trial) - E_current` without modifying stored state, and saves `pending_volume_mols`.
+- `COMMIT_VOLUME = 401` — zero-payload commit: C++ sends after an accepted move; server
+  commits `pending_volume_mols → comp_molecules` and sets `E_current = pending_E`.
+
+**C++ flow in `NVTGibbsMove`:**
+1. `ScalePositions` kernel runs as before (new positions in second half of GPU array).
+2. After the classical energy loop, if `UsePureDNN && UseSocket`: `cudaDeviceSynchronize`,
+   copy scaled positions from `d_a[comp].pos + Allocate_size` device→host, call
+   `DNN.QueryVolume` per box per component, accumulate `DNN_dE[sim]` per box.
+3. Inside the acceptance block, after computing classical `DeltaE[sim]`, set
+   `DeltaE[sim].DNN_E = DNN_dE[sim]` and call `DeltaE[sim].DNN_Replace_Energy(UsePureDNN)`.
+   This zeros all classical terms and stores the DNN ΔE in the HG field — identical
+   to the pattern used for insertion, deletion, and translation moves. The original
+   `Pacc` formula using `DeltaE[0].total() + DeltaE[1].total()` is unchanged.
+4. On accept: call `DNN.CommitVolume` (permanently updates `UCBox.Cell`) before
+   `CopyScaledPositions`.
+5. On reject: `QueryVolume` already restores `UCBox.Cell` internally; no extra action needed.
+
+**Cell matrix handling:** `QueryVolume` temporarily installs the scaled cell into `UCBox`
+(updating both `UCBox.Cell` and `UCBox.InverseCell` in-place via new helper
+`compute_inverse_cell_inplace`) so that `WrapPositionIntoUCBox` and the wire-format cell
+send both use the correct new cell. The original cell is restored on return.
+`CommitVolume` makes the new cell permanent.
+
+**Limitation:** Currently handles one adsorbate component per `QUERY_VOLUME` call.
+Multi-component volume moves would require sequential queries where each updates the
+server's `pending_trial_mols`; not implemented (single-component GEMC is the target use case).
+
+**Files changed:**
+
+- `src_clean/ase_energy_client.h` — `ConfigType` enum gains `QUERY_VOLUME = 400` and
+  `COMMIT_VOLUME = 401`; new helper `compute_inverse_cell_inplace`; new functions
+  `QueryVolume` and `CommitVolume`; timing fields and `PrintTimingSummary` updated
+- `src_clean/mc_box.h` `NVTGibbsMove` — DNN volume energy block + commit in accept path;
+  acceptance criterion switches between classical ΔE and `DNN_dE_total`
+- `ase_ipi_server_uma_pure.py` — `QUERY_VOLUME` / `COMMIT_VOLUME` handlers added to
+  `serve()`; `pending_volume_mols` / `pending_volume_comp` state variables; timing dict updated
+- `ase_ipi_server_mace_pure.py` — identical server-side changes (kept in sync)
+
+---
+
 ## 2026-04-22 — Fix: SIGFPE and SIGSEGV during socket init with empty-box (GEMC) framework
 
 **Summary:** Two zero-atom guards added to the socket client initialization path, fixing

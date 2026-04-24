@@ -77,6 +77,12 @@ PATCH_SOCKET_MAIN_PREP
 PATCH_SOCKET_POST_CREATEMOL
     if(Vars.SystemComponents[a].UseSocket)
     {
+      // CreateMolecule_InOneBox updates GPU positions only; HostSystem (CPU) is stale.
+      // Sync device->host before SyncFull so the server receives the actual accepted positions.
+      Atoms device_System[Vars.SystemComponents[a].NComponents.x];
+      Copy_AtomData_from_Device(device_System, Vars.SystemComponents[a].HostSystem,
+                                Vars.Sims[a].d_a, Vars.SystemComponents[a]);
+
       // Sync full adsorbate configuration to server after CreateMolecule_InOneBox.
       // Server uses this to prime E_current = E(fw + all_initial_ads).
       for(size_t comp = 1; comp < Vars.SystemComponents[a].NComponents.x; comp++)

@@ -47,6 +47,7 @@ import string
 
 import numpy as np
 from ase import Atoms
+import ase
 
 
 def generate_random_socket_name(prefix="graspa_", length=6):
@@ -58,14 +59,13 @@ def generate_random_socket_name(prefix="graspa_", length=6):
 # Calculator factory
 # ---------------------------------------------------------------------------
 def get_calculator(args):
-    """Return an ASE calculator.  Modify this to use CHGNet, etc."""
-
     from fairchem.core import FAIRChemCalculator, pretrained_mlip
     predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device="cuda")
     calc = FAIRChemCalculator(predictor, task_name="odac")
     print(f"Loaded UMA model: {args.model}  device={args.device}")
-
+    
     return calc
+
 
 # ---------------------------------------------------------------------------
 # Low-level iPI helpers
@@ -207,25 +207,30 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
     _timing = {k: {'count': 0, 't_recv': 0.0, 't_build': 0.0,
                    't_mace_full': 0.0, 't_mace_iso': 0.0, 't_send': 0.0}
                for k in ('FRAMEWORK', 'DELTA_QUERY', 'COMMIT_INSERT',
-                         'COMMIT_DELETE', 'COMMIT_MOVE', 'SYNC_FULL', 'QUERY_TOTAL')}
+                         'COMMIT_DELETE', 'COMMIT_MOVE', 'SYNC_FULL', 'QUERY_TOTAL',
+                         'QUERY_VOLUME', 'COMMIT_VOLUME')}
 
     DELTA_QUERY_BASE = 200
     COMMIT_INSERT    = 300
     COMMIT_DELETE    = 301
     COMMIT_MOVE      = 302
     SYNC_FULL        = 303
+    QUERY_VOLUME     = 400
+    COMMIT_VOLUME    = 401
     QUERY_TOTAL      = 500
 
-    step            = 0
-    cached_E_fw     = None
-    fw_symbols      = None
-    fw_positions    = None
-    comp_molecules  = {}
-    comp_mol_syms   = {}
-    E_current       = None
-    pending_E       = None
-    pending_mol     = None
-    last_delta_comp = None
+    step                = 0
+    cached_E_fw         = None
+    fw_symbols          = None
+    fw_positions        = None
+    comp_molecules      = {}
+    comp_mol_syms       = {}
+    E_current           = None
+    pending_E           = None
+    pending_mol         = None
+    last_delta_comp     = None
+    pending_volume_mols = None   # new_mols saved during QUERY_VOLUME
+    pending_volume_comp = None   # ads_comp saved during QUERY_VOLUME
 
     while True:
         try:
@@ -290,7 +295,10 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
 
             _tm = time.perf_counter()
             print(atoms_fw)
-            cached_E_fw  = atoms_fw.get_potential_energy()
+            if len(atoms_fw) == 0:
+                cached_E_fw = 0
+            else:
+                cached_E_fw  = atoms_fw.get_potential_energy()
             _t_mace_full = time.perf_counter() - _tm
 
             E_current = cached_E_fw
@@ -341,6 +349,7 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
                 # ---- DELETION: add back isolated molecule self-energy ----
                 pending_mol      = None
                 mol_syms_deleted = comp_mol_syms.get(ads_comp, [])
+                _del_oob = False
                 if 0 <= mol_idx < len(mol_list):
                     deleted_pos      = mol_list[mol_idx].copy()
                     mol_list[mol_idx] = mol_list[-1]
@@ -348,29 +357,38 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
                 else:
                     print(f"  WARNING: DELTA_QUERY DEL mol_idx={mol_idx} "
                           f"out of range (n={len(mol_list)})")
-                    deleted_pos = np.zeros((0, 3))
+                    _del_oob = True
                 trial_mols[ads_comp] = mol_list
 
-                _tb = time.perf_counter()
-                atoms_trial = _build_atoms(fw_symbols, fw_positions,
-                                           trial_mols, comp_mol_syms, cell)
-                atoms_trial.calc = calc
-                _t_build = time.perf_counter() - _tb
+                if not _del_oob:
+                    _tb = time.perf_counter()
+                    atoms_trial = _build_atoms(fw_symbols, fw_positions,
+                                               trial_mols, comp_mol_syms, cell)
+                    atoms_trial.calc = calc
+                    _t_build = time.perf_counter() - _tb
 
-                _tm = time.perf_counter()
-                E_full_trial = atoms_trial.get_potential_energy()
-                _t_mace_full = time.perf_counter() - _tm
+                    _tm = time.perf_counter()
+                    if len(atoms_trial) == 0:
+                        E_full_trial = cached_E_fw
+                    else:
+                        E_full_trial = atoms_trial.get_potential_energy()
+                    _t_mace_full = time.perf_counter() - _tm
 
-                _ti = time.perf_counter()
-                E_isolated = _isolated_mol_energy(
-                    deleted_pos, mol_syms_deleted, cell, calc)
-                _t_mace_iso = time.perf_counter() - _ti
+                    _ti = time.perf_counter()
+                    E_isolated = _isolated_mol_energy(
+                        deleted_pos, mol_syms_deleted, cell, calc)
+                    _t_mace_iso = time.perf_counter() - _ti
 
-                pending_E = E_full_trial
-                energy    = (E_full_trial + E_isolated) - E_current
-                move_str  = "DEL"
-                print(f"    E_trial={E_full_trial:.6f}  E_isolated={E_isolated:.6f}  "
-                      f"E_current={E_current:.6f}  dE={energy:.6f} eV")
+                    pending_E = E_full_trial
+                    energy    = (E_full_trial + E_isolated) - E_current
+                    move_str  = "DEL"
+                    print(f"    E_trial={E_full_trial:.6f}  E_isolated={E_isolated:.6f}  "
+                          f"E_current={E_current:.6f}  dE={energy:.6f} eV")
+                else:
+                    pending_E = E_current
+                    energy    = 1e10
+                    move_str  = "DEL-OOB"
+                    print(f"    out-of-range deletion: returning energy=1e10 to force rejection")
 
             else:
                 # ---- MOVE / REINSERTION: self-energy cancels, no correction ----
@@ -467,7 +485,10 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
             _t_build = time.perf_counter() - _tb
 
             _tm = time.perf_counter()
+            print(atoms_full)
+            ase.io.write('output.cif', atoms_full)
             E_current    = atoms_full.get_potential_energy()
+            print(E_current)
             _t_mace_full = time.perf_counter() - _tm
 
             energy = E_current - cached_E_fw
@@ -485,6 +506,58 @@ def serve(conn, calc, species_map, n_fw, profile_output="./runs/profiles/server_
             label  = "QUERY_TOTAL"
             print(f"  QUERY_TOTAL  E_current={E_current:.6f}  "
                   f"E_fw={cached_E_fw:.6f}  ads_interaction={energy:.6f} eV")
+
+        # ------------------------------------------------------------------ #
+        elif config_type == QUERY_VOLUME:
+            # Gibbs volume move trial: all molecules of ads_comp at new scaled positions.
+            # cell in this message is the NEW cell (sent by C++ after temporary update).
+            # Does NOT commit — server state is unchanged until COMMIT_VOLUME.
+            _timing_key = 'QUERY_VOLUME'
+            ads_comp = mol_idx
+            mol_size = natoms // n_mol if n_mol > 0 else 0
+
+            trial_mols = {c: list(mols) for c, mols in comp_molecules.items()}
+            new_mols   = [positions[i*mol_size:(i+1)*mol_size].copy()
+                          for i in range(n_mol)]
+            trial_mols[ads_comp] = new_mols
+
+            if ads_comp not in comp_mol_syms and symbols:
+                comp_mol_syms[ads_comp] = symbols[:mol_size]
+
+            _tb = time.perf_counter()
+            atoms_trial = _build_atoms(fw_symbols, fw_positions,
+                                       trial_mols, comp_mol_syms, cell)
+            atoms_trial.calc = calc
+            _t_build = time.perf_counter() - _tb
+
+            _tm = time.perf_counter()
+            E_trial      = atoms_trial.get_potential_energy()
+            _t_mace_full = time.perf_counter() - _tm
+
+            pending_volume_mols = new_mols
+            pending_volume_comp = ads_comp
+            pending_E           = E_trial
+
+            energy = E_trial - E_current
+            label  = f"QUERY_VOLUME comp={ads_comp} n_mol={n_mol} natoms={natoms}"
+            print(f"  {label}")
+            print(f"    E_trial={E_trial:.6f}  E_current={E_current:.6f}  dE={energy:.6f} eV")
+
+        # ------------------------------------------------------------------ #
+        elif config_type == COMMIT_VOLUME:
+            # Commit an accepted Gibbs volume move.
+            # Zero-payload: uses pending state saved during QUERY_VOLUME.
+            _timing_key = 'COMMIT_VOLUME'
+            ads_comp = mol_idx
+            if pending_volume_comp == ads_comp and pending_volume_mols is not None:
+                comp_molecules[ads_comp] = pending_volume_mols
+            pending_volume_mols = None
+            pending_volume_comp = None
+            E_current = pending_E
+            energy    = 0.0
+            label     = (f"COMMIT_VOLUME comp={ads_comp} "
+                         f"n_stored={len(comp_molecules.get(ads_comp, []))}")
+            print(f"  {label}  E_current={E_current:.6f} eV")
 
         else:
             print(f"  Unknown config_type={config_type} — returning 0")
