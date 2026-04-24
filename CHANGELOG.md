@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-04-24 — Fix: out-of-bounds Ewald write after Gibbs volume move acceptance
+
+**Summary:** After a Gibbs (or NPT) volume move was accepted, `Box.tempEik` and
+`Box.AdsorbateEik` were swapped correctly but the size trackers diverged: the old code
+did `EikAllocateSize = tempEikAllocateSize`, which copied the (possibly enlarged)
+`tempEikAllocateSize` into `EikAllocateSize` but left `tempEikAllocateSize` unchanged.
+After the pointer swap, `Box.tempEik` is the old `AdsorbateEik` (smaller allocation), yet
+`tempEikAllocateSize` still reported the larger post-reallocation value. On the next call
+to `Ewald_TotalEnergy`, the reallocation guard (`Nblock > tempEikAllocateSize`) evaluated
+false, so no reallocation occurred, and `TotalFourierEwald` wrote beyond the end of the
+undersized `Box.tempEik` array → "CUDA Error: illegal memory access."
+
+This bug only manifested in UMA runs (classical Ewald active, `noCharges=false`); MACE
+runs use `noCharges=true` and never enter the Ewald volume-move path.
+
+**Fix:** Changed `EikAllocateSize = tempEikAllocateSize` to
+`std::swap(EikAllocateSize, tempEikAllocateSize)` at both acceptance sites. After the
+swap, each size tracker correctly follows its corresponding pointer: `EikAllocateSize`
+reflects the capacity of `AdsorbateEik` and `tempEikAllocateSize` reflects the capacity
+of `tempEik`.
+
+**Files changed:**
+
+- `src_clean/mc_box.h` NPT volume acceptance block (~line 300) — `std::swap` instead of
+  one-directional assignment
+- `src_clean/mc_box.h` NVTGibbs volume acceptance block (~line 531) — same fix
+
+---
+
 ## 2026-04-23 — Fix: stale `HostSystem` positions passed to `SyncFull` after `CreateMolecule_InOneBox`
 
 **Summary:** When `CreateNumberOfMolecules > 0` (e.g. GEMC pre-filling boxes) and the socket

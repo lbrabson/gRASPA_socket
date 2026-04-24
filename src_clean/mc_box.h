@@ -297,7 +297,7 @@ void VolumeMove(Components& SystemComponents, Simulations& Sim, ForceField FF)
     {
       std::swap(Sim.Box.tempEik,          Sim.Box.AdsorbateEik);
       std::swap(Sim.Box.tempFrameworkEik, Sim.Box.FrameworkEik);
-      SystemComponents.EikAllocateSize = SystemComponents.tempEikAllocateSize;
+      std::swap(SystemComponents.EikAllocateSize, SystemComponents.tempEikAllocateSize);
     }
   }
   else
@@ -528,7 +528,7 @@ void NVTGibbsMove(std::vector<Components>& SystemComponents, Simulations*& Sims,
       {
         std::swap(Sims[sim].Box.tempEik,          Sims[sim].Box.AdsorbateEik);
         std::swap(Sims[sim].Box.tempFrameworkEik, Sims[sim].Box.FrameworkEik);
-        SystemComponents[sim].EikAllocateSize = SystemComponents[sim].tempEikAllocateSize;
+        std::swap(SystemComponents[sim].EikAllocateSize, SystemComponents[sim].tempEikAllocateSize);
       }
     }
   }
