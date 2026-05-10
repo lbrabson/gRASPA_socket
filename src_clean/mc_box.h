@@ -557,7 +557,7 @@ static inline void Update_Max_GibbsVolume(Gibbs& GibbsStatistics)
 {
   if(GibbsStatistics.GibbsBoxStats.x > 0)
   {
-    double ratio = static_cast<double>(GibbsStatistics.GibbsBoxStats.x) / static_cast<double>(GibbsStatistics.GibbsBoxStats.y);
+    double ratio = static_cast<double>(GibbsStatistics.GibbsBoxStats.y) / static_cast<double>(GibbsStatistics.GibbsBoxStats.x);
     double vandr = ratio/GibbsStatistics.TargetAccRatioVolumeChange;
     if(vandr > 1.5) vandr = 1.5;
     else if(ratio < 0.5) vandr = 0.5;

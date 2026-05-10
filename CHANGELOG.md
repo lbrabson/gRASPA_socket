@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-05-09 — Fix: inverted acceptance-ratio direction in `Update_Max_GibbsVolume`
+
+**Summary:** `Update_Max_GibbsVolume` in `src_clean/mc_box.h` computed the step-size
+scaling factor `vandr` using `ratio = attempts / accepted` (inverse of acceptance rate),
+then divided by `TargetAccRatioVolumeChange = 0.5`. This gave `vandr > 1` when
+acceptance was low (making `MaxGibbsBoxChange` grow when it should shrink) and
+`vandr = 4` when acceptance equalled the 50% target (making the step grow when it should
+stay flat). The result was that `MaxGibbsBoxChange` always ratcheted toward its upper cap
+of 0.5, regardless of actual acceptance rate.
+
+**Fix:** Swapped numerator and denominator so `ratio = accepted / attempts` (true
+acceptance rate). Now `vandr = acceptance_rate / TargetAccRatioVolumeChange`:
+greater than 1 when acceptance is too high (grow the step), less than 1 when too low
+(shrink it), exactly 1 at the target.
+
+**Files changed:**
+
+- `src_clean/mc_box.h` `Update_Max_GibbsVolume` (line 560) — swapped `GibbsBoxStats.x`
+  and `GibbsBoxStats.y` in the `ratio` assignment
+
+---
+
 ## 2026-05-09 — Fix: reinsertion move uses single-body translation + rotation when `TURN_OFF_CBMC_SWAP yes`
 
 **Summary:** When `TURN_OFF_CBMC_SWAP yes` is set (`SingleSwap = true`), GCMC swap
