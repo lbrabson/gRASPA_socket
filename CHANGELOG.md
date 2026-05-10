@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-05-09 — Fix: reinsertion move uses single-body translation + rotation when `TURN_OFF_CBMC_SWAP yes`
+
+**Summary:** When `TURN_OFF_CBMC_SWAP yes` is set (`SingleSwap = true`), GCMC swap
+moves route to `SingleBodyMove` to avoid CBMC Rosenbluth weighting, but the reinsertion
+move branch in `axpy.cu` had no equivalent gate — it always called
+`MOVES.REINSERTION.Run`, which internally runs multi-trial CBMC
+(`Widom_Move_FirstBead_PARTIAL` + `Widom_Move_Chain_PARTIAL`) to build a classical
+Rosenbluth weight and then multiplies in the DNN correction on top. For `UsePureDNN yes`,
+`DNN_Correction()` returns `DNN_E` unchanged, so the acceptance weight becomes
+`exp(−β·U_GG_classical) × exp(−β·DNN_E)` — double-counting all guest–guest interactions.
+
+**Fix:** Added a `SingleSwap` branch in the reinsertion block of `axpy.cu`. When
+`SingleSwap = true`, reinsertion is replaced by two consecutive `SingleBodyMove` calls:
+
+1. **Translation** with `MaxTranslation = {1e6, 1e6, 1e6}` Å — the displacement
+   `MaxChange·(2·random − 1)` far exceeds the box length, so PBC wrapping gives a
+   uniform random COM position across the full box.
+2. **Rotation** with `MaxRotation = {1e6, 1e6, 1e6}` rad (skipped for monatomic
+   molecules) — the large angle range produces a uniform random orientation.
+
+Each call uses standard Metropolis acceptance with `preFactor = 1` and no Rosenbluth
+weight: `Pacc = exp(−β·ΔE)` where `ΔE = E_new − E_old` comes directly from the DNN.
+Sequential independent acceptance of the two sub-moves is ergodically equivalent to
+combined reinsertion and satisfies detailed balance individually. The original
+`MaxTranslation` / `MaxRotation` values are saved and restored after each sub-move so
+step-size adaptation is unaffected.
+
+**Files changed:**
+
+- `patch_Socket/axpy.cu` reinsertion block — added `if(!SingleSwap) ... else { large-translation + large-rotation }` branch
+
+---
+
 ## 2026-05-09 — Fix: Gibbs particle transfer uses single-body moves when `TURN_OFF_CBMC_SWAP yes`
 
 **Summary:** When `TURN_OFF_CBMC_SWAP yes` is set, `SingleSwap = true` gates GCMC

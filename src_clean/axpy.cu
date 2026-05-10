@@ -193,8 +193,33 @@ void RunMoves(Variables& Vars, size_t box_index, int Cycle)
     MoveType = REINSERTION;
     if(SystemComponents.NumberOfMolecule_for_Component[comp] > 0)
     {
-      //DeltaE = Reinsertion(Vars, box_index);
-      DeltaE = MOVES.REINSERTION.Run(Vars, box_index);
+      if(!SystemComponents.SingleSwap)
+      {
+        //DeltaE = Reinsertion(Vars, box_index);
+        DeltaE = MOVES.REINSERTION.Run(Vars, box_index);
+      }
+      else
+      {
+        // SingleSwap=true: replace CBMC reinsertion with large translation + large rotation.
+        // MaxChange >> box length ensures PBC wrapping gives uniform random placement;
+        // large rotation angle gives uniform random orientation. Each move uses standard
+        // Metropolis acceptance (preFactor=1, no Rosenbluth). The pair is ergodically
+        // equivalent to reinsertion and each satisfies detailed balance individually.
+        MoveType = TRANSLATION;
+        double3 savedMaxTrans = SystemComponents.MaxTranslation[comp];
+        SystemComponents.MaxTranslation[comp] = {1e6, 1e6, 1e6};
+        DeltaE = SingleBodyMove(Vars, box_index);
+        SystemComponents.MaxTranslation[comp] = savedMaxTrans;
+
+        if(SystemComponents.Moleculesize[comp] > 1)
+        {
+          MoveType = ROTATION;
+          double3 savedMaxRot = SystemComponents.MaxRotation[comp];
+          SystemComponents.MaxRotation[comp] = {1e6, 1e6, 1e6};
+          DeltaE += SingleBodyMove(Vars, box_index);
+          SystemComponents.MaxRotation[comp] = savedMaxRot;
+        }
+      }
     }
     else
     {
