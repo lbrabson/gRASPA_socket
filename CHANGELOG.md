@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-05-09 — Fix: Gibbs particle transfer uses single-body moves when `TURN_OFF_CBMC_SWAP yes`
+
+**Summary:** When `TURN_OFF_CBMC_SWAP yes` is set, `SingleSwap = true` gates GCMC
+insertions and deletions to the classical single-body path (`SingleBodyMove`) — but
+`GibbsParticleTransfer` had no equivalent gate. It always called `Insertion_Body` and
+`Deletion_Body`, which build a multi-trial CBMC Rosenbluth weight from the classical
+force field and then multiply in the DNN correction on top. For `UsePureDNN yes` (no
+framework, all guest–guest interactions via MLIP), the stored host–guest terms are zero
+so `DNN_Correction()` returns `DNN_E` unchanged, leaving the classical GG Rosenbluth
+— `exp(−β·U_GG_classical)` — in the acceptance weight alongside the DNN energy. This
+double-counts guest–guest interactions for every Gibbs particle transfer, over-accepting
+vapor→liquid insertions and under-accepting liquid→vapor deletions, which systematically
+overestimates the liquid-phase density.
+
+**Fix:** Added a `SingleSwap` branch inside `GibbsParticleTransfer` that mirrors the
+pattern used for GCMC swaps in `axpy.cu`. When `SingleSwap = true`, the function calls
+`SingleBody_Prepare` + `SingleBody_Calculation` for both the insertion box and the
+deletion box instead of `Insertion_Body` / `Deletion_Body`. No classical Rosenbluth is
+ever formed. The Gibbs acceptance criterion is computed directly:
+
+```
+PAcc = exp(−β·(InsertionEnergy.total() + DeletionEnergy.total()))
+       × N_B·V_A / ((N_A+1)·V_B)
+```
+
+For `UsePureDNN yes`, `InsertionEnergy.total() = DNN_E_ins = E(N_A+1) − E_isolated − E(N_A)`
+and `DeletionEnergy.total() = DNN_E_del = E(N_B−1) + E_isolated − E(N_B)`, so the
+isolated-molecule energies cancel and the exponent reduces to the correct total Gibbs
+energy change `E(N_A+1) + E(N_B−1) − E(N_A) − E(N_B)`.
+
+On acceptance, `AcceptInsertion(..., SINGLE_INSERTION)` and `AcceptDeletion(..., SINGLE_DELETION)`
+are used, matching the mechanics of the GCMC single-body path. The existing CBMC path
+(`Insertion_Body` / `Deletion_Body`) is fully preserved for `SingleSwap = false`.
+
+**Files changed:**
+
+- `src_clean/mc_swap_moves.h` `GibbsParticleTransfer` — added `if(SingleSwap)` branch
+  before the CBMC path; single-body insertion + deletion + Gibbs PAcc + accept block
+
+---
+
 ## 2026-04-24 — Fix: out-of-bounds Ewald write after Gibbs volume move acceptance
 
 **Summary:** After a Gibbs (or NPT) volume move was accepted, `Box.tempEik` and

@@ -87,6 +87,58 @@ static inline void GibbsParticleTransfer(Variables& Vars, size_t SelectedCompone
   SystemComponents[SelectedBox].TempVal.molecule = InsertionSelectedMol;
   SystemComponents[SelectedBox].TempVal.component= SelectedComponent;
 
+  // When CBMC swaps are disabled, use single-body (no-Rosenbluth) insertion and deletion,
+  // mirroring the SingleBodyMove path used for GCMC swaps in axpy.cu.
+  if(SystemComponents[SelectedBox].SingleSwap)
+  {
+    // Single-body insertion into SelectedBox
+    SystemComponents[SelectedBox].TempVal.MoveType = SINGLE_INSERTION;
+    SingleBody_Prepare(Vars, SelectedBox);
+    MoveEnergy InsertionEnergy = SingleBody_Calculation(Vars, SelectedBox);
+    if(SystemComponents[SelectedBox].flag[0]) return; // overlap
+
+    // Single-body deletion from OtherBox
+    SystemComponents[OtherBox].TempVal.molecule  = DeletionSelectedMol;
+    SystemComponents[OtherBox].TempVal.component = SelectedComponent;
+    SystemComponents[OtherBox].TempVal.Scale     = SystemComponents[OtherBox].Lambda[SelectedComponent].SET_SCALE(1.0);
+    SystemComponents[OtherBox].TempVal.MoveType  = SINGLE_DELETION;
+    SingleBody_Prepare(Vars, OtherBox);
+    MoveEnergy DeletionEnergy = SingleBody_Calculation(Vars, OtherBox);
+
+    size_t NMolA = 0, NMolB = 0;
+    for(size_t comp = SystemComponents[SelectedBox].NComponents.y; comp < SystemComponents[SelectedBox].NComponents.x; comp++)
+      NMolA += SystemComponents[SelectedBox].NumberOfMolecule_for_Component[comp];
+    for(size_t comp = SystemComponents[OtherBox].NComponents.y; comp < SystemComponents[OtherBox].NComponents.x; comp++)
+      NMolB += SystemComponents[OtherBox].NumberOfMolecule_for_Component[comp];
+    for(size_t comp = 0; comp < SystemComponents[SelectedBox].NComponents.x; comp++)
+      if(SystemComponents[SelectedBox].hasfractionalMolecule[comp]) NMolA -= 1;
+    for(size_t comp = 0; comp < SystemComponents[OtherBox].NComponents.x; comp++)
+      if(SystemComponents[OtherBox].hasfractionalMolecule[comp]) NMolB -= 1;
+
+    // Gibbs PAcc: exp(-β·ΔE_total) × (N_B·V_A) / ((N_A+1)·V_B)
+    // InsertionEnergy.total() + DeletionEnergy.total() = E(N_A+1)+E(N_B-1)-E(N_A)-E(N_B)
+    // (isolated-molecule energies cancel between the two QueryDelta calls)
+    double PAcc = std::exp(-SystemComponents[SelectedBox].Beta * (InsertionEnergy.total() + DeletionEnergy.total()))
+                  * static_cast<double>(NMolB) * Sims[SelectedBox].Box.Volume
+                  / (static_cast<double>(NMolA + 1) * Sims[OtherBox].Box.Volume);
+
+    if(Get_Uniform_Random() < PAcc)
+    {
+      GibbsStatistics.GibbsXferStats.y += 1;
+      if(TransferFractionalMolecule)
+      {
+        SystemComponents[SelectedBox].hasfractionalMolecule[SelectedComponent] = true;
+        SystemComponents[OtherBox].hasfractionalMolecule[SelectedComponent]    = false;
+        SystemComponents[SelectedBox].Lambda[SelectedComponent].currentBin     = SystemComponents[OtherBox].Lambda[SelectedComponent].currentBin;
+      }
+      AcceptInsertion(Vars, SystemComponents[SelectedBox].CBMC_New[0], SelectedBox, SINGLE_INSERTION);
+      SystemComponents[SelectedBox].deltaE += InsertionEnergy;
+      AcceptDeletion(Vars, OtherBox, SINGLE_DELETION);
+      SystemComponents[OtherBox].deltaE -= DeletionEnergy;
+    }
+    return;
+  }
+
   //Perform Insertion on the selected System, then deletion on the other system//
 
   /////////////////////////////////////////////////
