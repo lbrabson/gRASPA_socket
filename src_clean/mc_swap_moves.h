@@ -311,6 +311,98 @@ static inline MoveEnergy IdentitySwapMove(Variables& Vars, size_t systemId)
 
   MoveEnergy energy; MoveEnergy old_energy;
 
+  if(SystemComponents.SingleSwap)
+  {
+    ///////////////////////////////////////////////////
+    // SINGLE-BODY (NON-CBMC) IDENTITY SWAP          //
+    ///////////////////////////////////////////////////
+
+    // Place NEW species first bead at OLD molecule's position, random rotation for rest
+    copy_firstbead_to_new<<<1,1>>>(Sims.New, Sims.d_a, OLDComponent, OLDMolInComponent * SystemComponents.Moleculesize[OLDComponent]);
+
+    // Compute insertion energy of NEW species (exclude OLD molecule to avoid self-interaction)
+    Sims.ExcludeList[0] = {OLDComponent, OLDMolInComponent};
+    SystemComponents.TempVal.component = NEWComponent;
+    SystemComponents.TempVal.molecule  = NEWMolInComponent;
+    SystemComponents.TempVal.MoveType  = SINGLE_IDENTITY_SWAP;
+    SystemComponents.TempVal.Scale     = SystemComponents.Lambda[NEWComponent].SET_SCALE(1.0);
+    SingleBody_Prepare(Vars, systemId);
+    if(SystemComponents.flag[0])
+    {
+      Sims.ExcludeList[0] = {-1, -1};
+      energy.zero(); return energy;
+    }
+    MoveEnergy InsertionEnergy = SingleBody_Calculation(Vars, systemId);
+    Sims.ExcludeList[0] = {-1, -1};
+
+    // Store new positions for Ewald and accept kernel (Sims.New.pos[0..NEWMolsize-1] are set)
+    size_t UpdateLocation = SystemComponents.Moleculesize[OLDComponent] * OLDMolInComponent;
+    cudaMemcpy(SystemComponents.tempMolStorage, Sims.New.pos,
+               SystemComponents.Moleculesize[NEWComponent] * sizeof(double3),
+               cudaMemcpyDeviceToDevice);
+
+    // Compute deletion energy of OLD species
+    SystemComponents.TempVal.component = OLDComponent;
+    SystemComponents.TempVal.molecule  = OLDMolInComponent;
+    SystemComponents.TempVal.MoveType  = SINGLE_DELETION;
+    SingleBody_Prepare(Vars, systemId);
+    MoveEnergy DeletionEnergy = SingleBody_Calculation(Vars, systemId);
+    DeletionEnergy.GGEwaldE = 0.0;
+    DeletionEnergy.HGEwaldE = 0.0;
+
+    energy = InsertionEnergy;
+    energy -= DeletionEnergy;
+
+    // Classical Ewald and tail only when not in pure-DNN mode
+    bool usePureDNN = SystemComponents.UseDNNforHostGuest && SystemComponents.UsePureDNN;
+    if(!usePureDNN)
+    {
+      if(!FF.noCharges)
+      {
+        double2 EwaldE = GPU_EwaldDifference_IdentitySwap(Sims.Box, Sims.d_a, Sims.Old, SystemComponents.tempMolStorage, FF, Sims.Blocksum, SystemComponents, OLDComponent, NEWComponent, UpdateLocation);
+        energy.GGEwaldE = EwaldE.x;
+        energy.HGEwaldE = EwaldE.y;
+      }
+      energy.TailE = TailCorrectionIdentitySwap(SystemComponents, NEWComponent, OLDComponent, FF.size, Sims.Box.Volume);
+    }
+
+    double preFactor  = GetPrefactor(SystemComponents, Sims, NEWComponent, INSERTION);
+           preFactor *= GetPrefactor(SystemComponents, Sims, OLDComponent, DELETION);
+    double Pacc = preFactor * std::exp(-SystemComponents.Beta * energy.total());
+
+    bool Accept = (Get_Uniform_Random() < Pacc);
+
+    if(Accept)
+    {
+      SystemComponents.Moves[NEWComponent].IdentitySwapAddAccepted++;
+      SystemComponents.Moves[OLDComponent].IdentitySwapRemoveAccepted++;
+      SystemComponents.Moves[OLDComponent].IdentitySwap_Acc_TO[NEWComponent]++;
+      if(NEWComponent != OLDComponent)
+      {
+        size_t LastMolecule = SystemComponents.NumberOfMolecule_for_Component[OLDComponent]-1;
+        size_t LastLocation = LastMolecule * SystemComponents.Moleculesize[OLDComponent];
+        Update_deletion_data<<<1,1>>>(Sims.d_a, OLDComponent, UpdateLocation, (int)SystemComponents.Moleculesize[OLDComponent], LastLocation);
+        if((SystemComponents.hasfractionalMolecule[OLDComponent]) && (LastMolecule == SystemComponents.Lambda[OLDComponent].FractionalMoleculeID))
+          SystemComponents.Lambda[OLDComponent].FractionalMoleculeID = OLDMolInComponent;
+        UpdateLocation = SystemComponents.Moleculesize[NEWComponent] * NEWMolInComponent;
+        Update_IdentitySwap_Insertion_data<<<1,1>>>(Sims.d_a, SystemComponents.tempMolStorage, NEWComponent, UpdateLocation, NEWMolInComponent, SystemComponents.Moleculesize[NEWComponent]); checkCUDAError("error Updating Identity Swap Insertion data");
+        Update_NumberOfMolecules(SystemComponents, Sims.d_a, NEWComponent, INSERTION);
+        Update_NumberOfMolecules(SystemComponents, Sims.d_a, OLDComponent, DELETION);
+      }
+      else
+      {
+        Update_Reinsertion_data<<<1,SystemComponents.Moleculesize[OLDComponent]>>>(Sims.d_a, SystemComponents.tempMolStorage, OLDComponent, UpdateLocation);
+      }
+      if(!FF.noCharges && !usePureDNN && ((SystemComponents.hasPartialCharge[NEWComponent]) || (SystemComponents.hasPartialCharge[OLDComponent])))
+        Update_Vector_Ewald(Sims.Box, false, SystemComponents, NEWComponent);
+      return energy;
+    }
+    else
+    {
+      energy.zero(); return energy;
+    }
+  }
+
   ///////////////
   // INSERTION //
   ///////////////

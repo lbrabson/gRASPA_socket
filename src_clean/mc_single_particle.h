@@ -65,7 +65,13 @@ inline void SingleBody_Prepare(Variables& Vars, size_t systemId)
       Do_New = true;
       start_position = 0;
       break;
-    } 
+    }
+    case SINGLE_IDENTITY_SWAP:
+    {
+      Do_New = true;
+      start_position = 0;
+      break;
+    }
     case SINGLE_DELETION:
     {
       Do_Old = true;
@@ -204,7 +210,8 @@ inline MoveEnergy SingleBody_Calculation(Variables& Vars, size_t systemId)
 
     // Calculate Ewald //
     bool EwaldPerformed = false;
-    if(!FF.noCharges && SystemComponents.hasPartialCharge[SelectedComponent])
+    if(!FF.noCharges && SystemComponents.hasPartialCharge[SelectedComponent]
+       && MoveType != SINGLE_IDENTITY_SWAP) // IdentitySwap uses GPU_EwaldDifference_IdentitySwap instead
     {
       double2 newScale  = SystemComponents.Lambda[SelectedComponent].SET_SCALE(1.0);
       double2 EwaldE = GPU_EwaldDifference_General(Sims, FF, SystemComponents, SelectedComponent, MoveType, 0, newScale);
