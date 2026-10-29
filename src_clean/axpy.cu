@@ -193,7 +193,7 @@ void RunMoves(Variables& Vars, size_t box_index, int Cycle)
     MoveType = REINSERTION;
     if(SystemComponents.NumberOfMolecule_for_Component[comp] > 0)
     {
-      //DeltaE = Reinsertion(Vars, box_index);
+       //DeltaE = Reinsertion(Vars, box_index);
       DeltaE = MOVES.REINSERTION.Run(Vars, box_index);
     }
     else

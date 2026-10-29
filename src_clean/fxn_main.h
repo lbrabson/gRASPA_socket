@@ -341,7 +341,7 @@ inline void Check_Simulation_Energy(Boxsize& Box, Atoms* System, ForceField FF, 
   if(SystemComponents.UseDNNforHostGuest) 
   {
     ENERGY.DNN_E     = DNN_Prediction_Total(SystemComponents, Sim);
-    ENERGY.DNN_Replace_Energy();
+    ENERGY.DNN_Replace_Energy(SystemComponents.UsePureDNN);
     double Correction = ENERGY.DNN_Correction();
   }
  

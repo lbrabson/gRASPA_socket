@@ -1,0 +1,29 @@
+---------------------------------------
+Begin Slurm Prolog: Mar-10-2026 23:28:17
+Job ID:    4754805
+User ID:   lbrabson3
+Account:   gts-amedford6-paid
+Job name:  gcmc
+Partition: gpu-a100
+QOS:       inferno
+---------------------------------------
+Socket: /tmp/graspa_26a2da
+Starting MACE iPI server (model: /storage/home/hcoda1/8/lbrabson3/r-amedford6-0/mace-mpa-0-medium.model)...
+Waiting for server socket: /tmp/graspa_26a2da ...
+Server socket ready after 12s.
+Starting gRASPA...
+/var/lib/slurm/slurmd/job4754805/slurm_script: line 59: 1473540 Illegal instruction     /storage/home/hcoda1/8/lbrabson3/r-amedford6-0/gRASPA_dir/gRASPA_socket-manybody-ewald/patch_Socket/nvc_main.x > raspa.out 2>&1
+gRASPA finished. Stopping server...
+Done.
+---------------------------------------
+Begin Slurm Epilog: Mar-10-2026 23:28:32
+Job ID:        4754805
+User ID:       lbrabson3
+Account:       gts-amedford6-paid
+Job name:      gcmc
+Resources:     cpu=8,gres/gpu:a100=1,mem=80G,node=1
+Rsrc Used:     cput=00:02:08,vmem=0,walltime=00:00:16,mem=1441376K,energy_used=0
+Partition:     gpu-a100
+QOS:           inferno
+Nodes:         atl1-1-02-018-31-0
+---------------------------------------

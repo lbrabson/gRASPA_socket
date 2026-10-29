@@ -191,6 +191,8 @@ Variables Initialize(void) //for pybind
     /////////////////////////////////////
     //Zhao's note: different systems will share the SAME components (for adsorbate), only read it once//
       Vars.TempComponents.UseDNNforHostGuest = Comp_for_DNN_Model[a].UseDNNforHostGuest;
+      Vars.TempComponents.DebugMode          = Comp_for_DNN_Model[a].DebugMode;
+      Vars.TempComponents.UsePureDNN          = Comp_for_DNN_Model[a].UsePureDNN;
       Vars.TempComponents.UseAllegro         = Comp_for_DNN_Model[a].UseAllegro;
       Vars.TempComponents.UseLCLin           = Comp_for_DNN_Model[a].UseLCLin;
       Vars.TempComponents.UseSocket          = Comp_for_DNN_Model[a].UseSocket;
@@ -253,19 +255,18 @@ Variables Initialize(void) //for pybind
     cudaMalloc(&Vars.Sims[a].d_a, sizeof(Atoms)*NComponents.x);
     InitializeMaxTranslationRotation(Vars.SystemComponents[a]);
     //Read initial configurations either from restart file or from lammps data file//
-    if(RunSingleSim)
+    //Gibbs ensemble (RunSingleSim=false) also reads restart for each box using System_{a}/restartfile//
+    bool doReadRestart = ReadRestart && (RunSingleSim ? (a == SelectedSim) : true);
+    if(doReadRestart)
     {
-      if(a == SelectedSim && ReadRestart)
-      { 
-        ReadRestartInputFileType(Vars.SystemComponents[a]);
-        if(Vars.SystemComponents[a].RestartInputFileType == RASPA_RESTART) 
-        {
-          RestartFileParser(Vars.Box[a], Vars.SystemComponents[a]); AlreadyHasFractionalMolecule = true;
-        }
-        else if(Vars.SystemComponents[a].RestartInputFileType == LAMMPS_DATA)
-        {
-          LMPDataFileParser(Vars.Box[a], Vars.SystemComponents[a]);
-        }
+      ReadRestartInputFileType(Vars.SystemComponents[a]);
+      if(Vars.SystemComponents[a].RestartInputFileType == RASPA_RESTART)
+      {
+        RestartFileParser(Vars.Box[a], Vars.SystemComponents[a], a); AlreadyHasFractionalMolecule = true;
+      }
+      else if(Vars.SystemComponents[a].RestartInputFileType == LAMMPS_DATA)
+      {
+        LMPDataFileParser(Vars.Box[a], Vars.SystemComponents[a]);
       }
     }
     //Zhao's note: move copying cell information to GPU after reading restart
@@ -315,9 +316,13 @@ Variables Initialize(void) //for pybind
       }
       else
       {
-        // No DNNPseudoAtoms keyword — default: pass all adsorbate atoms to the model
+        // No DNNPseudoAtoms keyword — pass all atoms but skip massless sites (e.g. TIP4P M-site)
         for(size_t y = 0; y < Vars.SystemComponents[a].Moleculesize[1]; y++)
-          ConsiderThisAdsorbateAtom[y] = true;
+        {
+          int pseudoAtomType = Vars.SystemComponents[a].HostSystem[1].Type[y];
+          double mass = Vars.SystemComponents[a].PseudoAtoms.mass[pseudoAtomType];
+          ConsiderThisAdsorbateAtom[y] = (mass > 0.0);
+        }
       }
       //Declare a new, cuda managed mem (accessible on both CPU/GPU) to overwrite the original  bool mem
       cudaMallocManaged(&Vars.SystemComponents[a].ConsiderThisAdsorbateAtom, sizeof(bool) * Vars.SystemComponents[a].Moleculesize[1]);
@@ -346,6 +351,8 @@ Variables Initialize(void) //for pybind
     // CREATE MOLECULES IN THE BOX BEFORE SIMULAITON STARTS //
     //////////////////////////////////////////////////////////
     Energy[a].running_energy = CreateMolecule_InOneBox(Vars, a, AlreadyHasFractionalMolecule);
+
+    //###PATCH_SOCKET_POST_CREATEMOL###//
 
     Check_Simulation_Energy(Vars.Box[a], Vars.SystemComponents[a].HostSystem, Vars.FF, Vars.device_FF, Vars.SystemComponents[a], CREATEMOL, a, Vars.Sims[a], true);
   }
@@ -441,8 +448,10 @@ void EndOfSimulationWrapUp(Variables& Vars)
     fprintf(Vars.SystemComponents[i].OUTPUT, "DNN Feature Preparation Time: %.5f, DNN Prediction Time: %.5f\n", Vars.SystemComponents[0].DNNFeatureTime, Vars.SystemComponents[0].DNNPredictTime);
     fprintf(Vars.SystemComponents[i].OUTPUT, "DNN GPU Time: %.5f, ", Vars.SystemComponents[i].DNNGPUTime);
     fprintf(Vars.SystemComponents[i].OUTPUT, "DNN Sort Time: %.5f, ", Vars.SystemComponents[0].DNNSortTime);
-    fprintf(Vars.SystemComponents[i].OUTPUT, "std::sort Time: %.5f, ", Vars.SystemComponents[0].DNNstdsortTime); 
+    fprintf(Vars.SystemComponents[i].OUTPUT, "std::sort Time: %.5f, ", Vars.SystemComponents[0].DNNstdsortTime);
     fprintf(Vars.SystemComponents[i].OUTPUT, "Featurization Time: %.5f\n", Vars.SystemComponents[0].DNNFeaturizationTime);
+    if(Vars.SystemComponents[i].UseSocket)
+      Vars.SystemComponents[i].DNN.PrintTimingSummary(Vars.SystemComponents[i].OUTPUT);
   } 
   /////////////////////////////////////////////////////////
   // Check if the Ewald Diff and running Diff make sense //

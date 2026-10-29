@@ -1,0 +1,26 @@
+PATCH_SOCKET_COMMIT_MOVE
+  if(SystemComponents.UseSocket)
+  {
+    // Commit the accepted translation/rotation move to server state.
+    size_t comp     = SystemComponents.TempVal.component;
+    int    mol_idx  = (int)SystemComponents.TempVal.molecule;
+    SystemComponents.DNN.CommitMove(comp, mol_idx);
+  }
+
+PATCH_SOCKET_COMMIT_INSERT
+  if(SystemComponents.UseSocket)
+  {
+    // Commit the accepted insertion to server state.
+    size_t comp     = SystemComponents.TempVal.component;
+    SystemComponents.DNN.CommitInsert(comp);
+  }
+
+PATCH_SOCKET_COMMIT_DELETE
+  if(SystemComponents.UseSocket)
+  {
+    // TempVal.molecule is the index of the deleted molecule (before swap-with-last).
+    size_t comp  = SystemComponents.TempVal.component;
+    int mol_idx  = (int)SystemComponents.TempVal.molecule;
+    SystemComponents.DNN.CommitDelete(comp, mol_idx);
+  }
+

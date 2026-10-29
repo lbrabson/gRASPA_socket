@@ -304,7 +304,7 @@ bool Check_DNN_Drift(Variables& Vars, size_t systemId, MoveEnergy& tot)
 
   bool REJECT = false; 
   double correction = tot.DNN_Correction(); //If use DNN, HGVDWReal and HGEwaldE are zeroed//
-  if(fabs(correction) > SystemComponents.DNNDrift) //If there is a huge drift in the energy correction between DNN and Classical HostGuest//
+  if(!SystemComponents.UseSocket && fabs(correction) > SystemComponents.DNNDrift) //If there is a huge drift in the energy correction between DNN and Classical HostGuest//
   { 
     //printf("TRANSLATION/ROTATION: Bad Prediction, reject the move!!!\n");
     switch(MoveType)

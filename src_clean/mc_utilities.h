@@ -306,6 +306,7 @@ inline void AcceptTranslation(Variables& Vars, size_t systemId)
   {
     Update_Vector_Ewald(Sims.Box, false, SystemComponents, SelectedComponent);
   }
+  //###PATCH_SOCKET_COMMIT_MOVE###//
 }
 
 ////////////////////////////////////////////////
@@ -382,6 +383,7 @@ inline void AcceptInsertion(Variables& Vars, CBMC_Variables& InsertionVariables,
   {
     Update_Vector_Ewald(Sims.Box, false, SystemComponents, SelectedComponent);
   }
+  //###PATCH_SOCKET_COMMIT_INSERT###//
 }
 
 inline void AcceptDeletion(Variables& Vars, size_t systemId, int MoveType)
@@ -414,6 +416,7 @@ inline void AcceptDeletion(Variables& Vars, size_t systemId, int MoveType)
     //Since the fractional molecule is moved to the place of the selected deleted molecule, update fractional molecule ID on host
     SystemComponents.Lambda[SelectedComponent].FractionalMoleculeID = SystemComponents.TempVal.molecule;
   }
+  //###PATCH_SOCKET_COMMIT_DELETE###//
 }
 
 //////////////////////////////////////////////////
@@ -539,12 +542,29 @@ static __global__ void get_new_position(Simulations& Sim, ForceField FF, size_t 
       break;
     }
     case SINGLE_INSERTION:
-    { 
+    {
       //First ROTATION using QUATERNIONS//
       //Then TRANSLATION//
       double3 BoxLength = {Sim.Box.Cell[0], Sim.Box.Cell[4], Sim.Box.Cell[8]};
       double3 NEW_COM   = BoxLength * RANDOM[index];
       if(i == 0) Sim.New.pos[0] = NEW_COM;
+      if(i > 0)
+      {
+        double3 Vec = pos - Sim.d_a[SelectedComponent].pos[start_position];
+        Rotate_Quaternions(Vec, RANDOM[index + 1]);
+        Sim.New.pos[i] = Vec + NEW_COM;
+      }
+      Sim.New.scale[i] = scale;
+      Sim.New.charge[i] = charge;
+      Sim.New.scaleCoul[i] = scaleCoul;
+      Sim.New.Type[i] = Type;
+      Sim.New.MolID[i] = Sim.d_a[SelectedComponent].size / Sim.d_a[SelectedComponent].Molsize;
+      break;
+    }
+    case SINGLE_IDENTITY_SWAP:
+    {
+      // pos[0] already placed by copy_firstbead_to_new; just rotate remaining beads
+      double3 NEW_COM = Sim.New.pos[0];
       if(i > 0)
       {
         double3 Vec = pos - Sim.d_a[SelectedComponent].pos[start_position];

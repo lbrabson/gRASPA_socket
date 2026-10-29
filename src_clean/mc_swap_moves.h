@@ -87,6 +87,58 @@ static inline void GibbsParticleTransfer(Variables& Vars, size_t SelectedCompone
   SystemComponents[SelectedBox].TempVal.molecule = InsertionSelectedMol;
   SystemComponents[SelectedBox].TempVal.component= SelectedComponent;
 
+  // When CBMC swaps are disabled, use single-body (no-Rosenbluth) insertion and deletion,
+  // mirroring the SingleBodyMove path used for GCMC swaps in axpy.cu.
+  if(SystemComponents[SelectedBox].SingleSwap)
+  {
+    // Single-body insertion into SelectedBox
+    SystemComponents[SelectedBox].TempVal.MoveType = SINGLE_INSERTION;
+    SingleBody_Prepare(Vars, SelectedBox);
+    MoveEnergy InsertionEnergy = SingleBody_Calculation(Vars, SelectedBox);
+    if(SystemComponents[SelectedBox].flag[0]) return; // overlap
+
+    // Single-body deletion from OtherBox
+    SystemComponents[OtherBox].TempVal.molecule  = DeletionSelectedMol;
+    SystemComponents[OtherBox].TempVal.component = SelectedComponent;
+    SystemComponents[OtherBox].TempVal.Scale     = SystemComponents[OtherBox].Lambda[SelectedComponent].SET_SCALE(1.0);
+    SystemComponents[OtherBox].TempVal.MoveType  = SINGLE_DELETION;
+    SingleBody_Prepare(Vars, OtherBox);
+    MoveEnergy DeletionEnergy = SingleBody_Calculation(Vars, OtherBox);
+
+    size_t NMolA = 0, NMolB = 0;
+    for(size_t comp = SystemComponents[SelectedBox].NComponents.y; comp < SystemComponents[SelectedBox].NComponents.x; comp++)
+      NMolA += SystemComponents[SelectedBox].NumberOfMolecule_for_Component[comp];
+    for(size_t comp = SystemComponents[OtherBox].NComponents.y; comp < SystemComponents[OtherBox].NComponents.x; comp++)
+      NMolB += SystemComponents[OtherBox].NumberOfMolecule_for_Component[comp];
+    for(size_t comp = 0; comp < SystemComponents[SelectedBox].NComponents.x; comp++)
+      if(SystemComponents[SelectedBox].hasfractionalMolecule[comp]) NMolA -= 1;
+    for(size_t comp = 0; comp < SystemComponents[OtherBox].NComponents.x; comp++)
+      if(SystemComponents[OtherBox].hasfractionalMolecule[comp]) NMolB -= 1;
+
+    // Gibbs PAcc: exp(-β·ΔE_total) × (N_B·V_A) / ((N_A+1)·V_B)
+    // InsertionEnergy.total() + DeletionEnergy.total() = E(N_A+1)+E(N_B-1)-E(N_A)-E(N_B)
+    // (isolated-molecule energies cancel between the two QueryDelta calls)
+    double PAcc = std::exp(-SystemComponents[SelectedBox].Beta * (InsertionEnergy.total() + DeletionEnergy.total()))
+                  * static_cast<double>(NMolB) * Sims[SelectedBox].Box.Volume
+                  / (static_cast<double>(NMolA + 1) * Sims[OtherBox].Box.Volume);
+
+    if(Get_Uniform_Random() < PAcc)
+    {
+      GibbsStatistics.GibbsXferStats.y += 1;
+      if(TransferFractionalMolecule)
+      {
+        SystemComponents[SelectedBox].hasfractionalMolecule[SelectedComponent] = true;
+        SystemComponents[OtherBox].hasfractionalMolecule[SelectedComponent]    = false;
+        SystemComponents[SelectedBox].Lambda[SelectedComponent].currentBin     = SystemComponents[OtherBox].Lambda[SelectedComponent].currentBin;
+      }
+      AcceptInsertion(Vars, SystemComponents[SelectedBox].CBMC_New[0], SelectedBox, SINGLE_INSERTION);
+      SystemComponents[SelectedBox].deltaE += InsertionEnergy;
+      AcceptDeletion(Vars, OtherBox, SINGLE_DELETION);
+      SystemComponents[OtherBox].deltaE -= DeletionEnergy;
+    }
+    return;
+  }
+
   //Perform Insertion on the selected System, then deletion on the other system//
 
   /////////////////////////////////////////////////
@@ -143,6 +195,9 @@ static inline void GibbsParticleTransfer(Variables& Vars, size_t SelectedCompone
   double PAcc = (InsertionVariables.Rosenbluth * static_cast<double>(NMolB) * Sims[SelectedBox].Box.Volume) / (DeletionVariables.Rosenbluth * static_cast<double>(NMolA + 1) * Sims[OtherBox].Box.Volume);
   //This assumes that the two boxes share the same temperature, it might not be true//
   if(Get_Uniform_Random()< PAcc) Accept = true;
+
+  // printf(Accept ? "ACCEPTED" : "REJECTED");
+  // fflush(stdout);
 
   //printf("CYCLE: %zu, Insertion box: %zu, delete box: %zu, delete molecule: %zu, InsertionRosen: %.5f, DeletionRosen: %.5f, PAcc: %.5f\n", SystemComponents[0].CURRENTCYCLE, SelectedBox, OtherBox, DeletionSelectedMol, InsertionRosen, DeletionRosen, PAcc);
 
@@ -255,6 +310,98 @@ static inline MoveEnergy IdentitySwapMove(Variables& Vars, size_t systemId)
   SystemComponents.Moves[OLDComponent].IdentitySwap_Total_TO[NEWComponent] ++;
 
   MoveEnergy energy; MoveEnergy old_energy;
+
+  if(SystemComponents.SingleSwap)
+  {
+    ///////////////////////////////////////////////////
+    // SINGLE-BODY (NON-CBMC) IDENTITY SWAP          //
+    ///////////////////////////////////////////////////
+
+    // Place NEW species first bead at OLD molecule's position, random rotation for rest
+    copy_firstbead_to_new<<<1,1>>>(Sims.New, Sims.d_a, OLDComponent, OLDMolInComponent * SystemComponents.Moleculesize[OLDComponent]);
+
+    // Compute insertion energy of NEW species (exclude OLD molecule to avoid self-interaction)
+    Sims.ExcludeList[0] = {OLDComponent, OLDMolInComponent};
+    SystemComponents.TempVal.component = NEWComponent;
+    SystemComponents.TempVal.molecule  = NEWMolInComponent;
+    SystemComponents.TempVal.MoveType  = SINGLE_IDENTITY_SWAP;
+    SystemComponents.TempVal.Scale     = SystemComponents.Lambda[NEWComponent].SET_SCALE(1.0);
+    SingleBody_Prepare(Vars, systemId);
+    if(SystemComponents.flag[0])
+    {
+      Sims.ExcludeList[0] = {-1, -1};
+      energy.zero(); return energy;
+    }
+    MoveEnergy InsertionEnergy = SingleBody_Calculation(Vars, systemId);
+    Sims.ExcludeList[0] = {-1, -1};
+
+    // Store new positions for Ewald and accept kernel (Sims.New.pos[0..NEWMolsize-1] are set)
+    size_t UpdateLocation = SystemComponents.Moleculesize[OLDComponent] * OLDMolInComponent;
+    cudaMemcpy(SystemComponents.tempMolStorage, Sims.New.pos,
+               SystemComponents.Moleculesize[NEWComponent] * sizeof(double3),
+               cudaMemcpyDeviceToDevice);
+
+    // Compute deletion energy of OLD species
+    SystemComponents.TempVal.component = OLDComponent;
+    SystemComponents.TempVal.molecule  = OLDMolInComponent;
+    SystemComponents.TempVal.MoveType  = SINGLE_DELETION;
+    SingleBody_Prepare(Vars, systemId);
+    MoveEnergy DeletionEnergy = SingleBody_Calculation(Vars, systemId);
+    DeletionEnergy.GGEwaldE = 0.0;
+    DeletionEnergy.HGEwaldE = 0.0;
+
+    energy = InsertionEnergy;
+    energy -= DeletionEnergy;
+
+    // Classical Ewald and tail only when not in pure-DNN mode
+    bool usePureDNN = SystemComponents.UseDNNforHostGuest && SystemComponents.UsePureDNN;
+    if(!usePureDNN)
+    {
+      if(!FF.noCharges)
+      {
+        double2 EwaldE = GPU_EwaldDifference_IdentitySwap(Sims.Box, Sims.d_a, Sims.Old, SystemComponents.tempMolStorage, FF, Sims.Blocksum, SystemComponents, OLDComponent, NEWComponent, UpdateLocation);
+        energy.GGEwaldE = EwaldE.x;
+        energy.HGEwaldE = EwaldE.y;
+      }
+      energy.TailE = TailCorrectionIdentitySwap(SystemComponents, NEWComponent, OLDComponent, FF.size, Sims.Box.Volume);
+    }
+
+    double preFactor  = GetPrefactor(SystemComponents, Sims, NEWComponent, INSERTION);
+           preFactor *= GetPrefactor(SystemComponents, Sims, OLDComponent, DELETION);
+    double Pacc = preFactor * std::exp(-SystemComponents.Beta * energy.total());
+
+    bool Accept = (Get_Uniform_Random() < Pacc);
+
+    if(Accept)
+    {
+      SystemComponents.Moves[NEWComponent].IdentitySwapAddAccepted++;
+      SystemComponents.Moves[OLDComponent].IdentitySwapRemoveAccepted++;
+      SystemComponents.Moves[OLDComponent].IdentitySwap_Acc_TO[NEWComponent]++;
+      if(NEWComponent != OLDComponent)
+      {
+        size_t LastMolecule = SystemComponents.NumberOfMolecule_for_Component[OLDComponent]-1;
+        size_t LastLocation = LastMolecule * SystemComponents.Moleculesize[OLDComponent];
+        Update_deletion_data<<<1,1>>>(Sims.d_a, OLDComponent, UpdateLocation, (int)SystemComponents.Moleculesize[OLDComponent], LastLocation);
+        if((SystemComponents.hasfractionalMolecule[OLDComponent]) && (LastMolecule == SystemComponents.Lambda[OLDComponent].FractionalMoleculeID))
+          SystemComponents.Lambda[OLDComponent].FractionalMoleculeID = OLDMolInComponent;
+        UpdateLocation = SystemComponents.Moleculesize[NEWComponent] * NEWMolInComponent;
+        Update_IdentitySwap_Insertion_data<<<1,1>>>(Sims.d_a, SystemComponents.tempMolStorage, NEWComponent, UpdateLocation, NEWMolInComponent, SystemComponents.Moleculesize[NEWComponent]); checkCUDAError("error Updating Identity Swap Insertion data");
+        Update_NumberOfMolecules(SystemComponents, Sims.d_a, NEWComponent, INSERTION);
+        Update_NumberOfMolecules(SystemComponents, Sims.d_a, OLDComponent, DELETION);
+      }
+      else
+      {
+        Update_Reinsertion_data<<<1,SystemComponents.Moleculesize[OLDComponent]>>>(Sims.d_a, SystemComponents.tempMolStorage, OLDComponent, UpdateLocation);
+      }
+      if(!FF.noCharges && !usePureDNN && ((SystemComponents.hasPartialCharge[NEWComponent]) || (SystemComponents.hasPartialCharge[OLDComponent])))
+        Update_Vector_Ewald(Sims.Box, false, SystemComponents, NEWComponent);
+      return energy;
+    }
+    else
+    {
+      energy.zero(); return energy;
+    }
+  }
 
   ///////////////
   // INSERTION //
@@ -379,6 +526,9 @@ static inline MoveEnergy IdentitySwapMove(Variables& Vars, size_t systemId)
   double RANDOM = Get_Uniform_Random();
   bool Accept = false;
   if(RANDOM < Pacc) Accept = true;
+
+  // printf(Accept ? "ACCEPTED" : "REJECTED");
+  // fflush(stdout);
 
   if(Accept)
   { // accept the move

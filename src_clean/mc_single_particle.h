@@ -65,7 +65,13 @@ inline void SingleBody_Prepare(Variables& Vars, size_t systemId)
       Do_New = true;
       start_position = 0;
       break;
-    } 
+    }
+    case SINGLE_IDENTITY_SWAP:
+    {
+      Do_New = true;
+      start_position = 0;
+      break;
+    }
     case SINGLE_DELETION:
     {
       Do_Old = true;
@@ -204,7 +210,8 @@ inline MoveEnergy SingleBody_Calculation(Variables& Vars, size_t systemId)
 
     // Calculate Ewald //
     bool EwaldPerformed = false;
-    if(!FF.noCharges && SystemComponents.hasPartialCharge[SelectedComponent])
+    if(!FF.noCharges && SystemComponents.hasPartialCharge[SelectedComponent]
+       && MoveType != SINGLE_IDENTITY_SWAP) // IdentitySwap uses GPU_EwaldDifference_IdentitySwap instead
     {
       double2 newScale  = SystemComponents.Lambda[SelectedComponent].SET_SCALE(1.0);
       double2 EwaldE = GPU_EwaldDifference_General(Sims, FF, SystemComponents, SelectedComponent, MoveType, 0, newScale);
@@ -226,7 +233,22 @@ inline MoveEnergy SingleBody_Calculation(Variables& Vars, size_t systemId)
       //Calculate DNN//
       if(!EwaldPerformed) Prepare_DNN_InitialPositions(Sims.d_a, Sims.New, Sims.Old, SystemComponents.tempMolStorage, SystemComponents, SelectedComponent, MoveType, 0);
       tot.DNN_E = DNN_Prediction_Move(SystemComponents, Sims, SelectedComponent, MoveType);
-      tot.DNN_Replace_Energy();
+      if(SystemComponents.DebugMode)
+      {
+        const char* moveLabel = (MoveType == 0) ? "TRANS" : (MoveType == 1) ? "ROTATION" : "OTHER";
+        printf("MoveType: %s\n", moveLabel);
+        printf("  HH: VDW=%.6f Real=%.6f EwaldE=%.6f\n", tot.HHVDW, tot.HHReal, tot.HHEwaldE);
+        printf("  HG: VDW=%.6f Real=%.6f EwaldE=%.6f DNN_E=%.6f\n", tot.HGVDW, tot.HGReal, tot.HGEwaldE, tot.DNN_E);
+        printf("  GG: VDW=%.6f Real=%.6f EwaldE=%.6f\n", tot.GGVDW, tot.GGReal, tot.GGEwaldE);
+      }
+
+      tot.DNN_Replace_Energy(SystemComponents.UsePureDNN);
+      
+      if(SystemComponents.DebugMode)
+      {
+        printf("  preFactor=%.6f Beta=%.6f TailE=%.6f total=%.6f\n", SystemComponents.TempVal.preFactor, SystemComponents.Beta, tot.TailE, tot.total());
+        fflush(stdout);
+      }
     }
     double& preFactor = SystemComponents.TempVal.preFactor;
     double& Pacc      = SystemComponents.TempVal.Pacc;
@@ -282,9 +304,16 @@ inline void SingleBody_Acceptance(Variables& Vars, size_t systemId, MoveEnergy& 
       }
     }
     SystemComponents.Moves[SelectedComponent].Record_Move_Accept(MoveType);
+    // printf("  ACCEPTED\n");
+    // fflush(stdout);
   }
   else
   {
+    // if(!SystemComponents.TempVal.CheckOverlap) // don't print the zeros from an overlapping config
+    // {
+    //   printf("  REJECTED\n");
+    //   fflush(stdout);
+    // }
     tot.zero();
   }
 }

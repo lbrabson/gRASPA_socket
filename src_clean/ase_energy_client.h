@@ -8,18 +8,34 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <omp.h>
+
 // Config-type constants for socket routing.
 // These are sent as a 4-byte int32 BEFORE the cell matrix in every POSDATA
 // exchange so the Python server can unambiguously identify which symbol list
 // to use, regardless of atom count.
 //
 //   CONFIG_FRAMEWORK (0)   : framework-only configuration
-//   N   (1, 2, ...)        : adsorbate-only for component N
-//   100+N (101, 102, ...)  : total (framework + adsorbate component N)
 enum ConfigType : int32_t {
-    CONFIG_FRAMEWORK = 0,
-    // adsorbate-only:  use ads_comp directly (1, 2, ...)
-    // total:           use 100 + ads_comp (101, 102, ...)
+    CONFIG_FRAMEWORK  = 0,
+
+    // N-body delta query: config_type = 200 + ads_comp
+    //   mol_idx = -1  : insertion trial
+    //   mol_idx >= 0  : move or deletion (distinguished by n_mol: 1=move, 0=deletion)
+    DELTA_QUERY_BASE  = 200,
+
+    // Commit messages: notify server of accepted move so it can update stored config
+    COMMIT_INSERT     = 300,   // append new molecule
+    COMMIT_DELETE     = 301,   // swap-with-last delete mol_idx
+    COMMIT_MOVE       = 302,   // update mol_idx position
+    SYNC_FULL         = 303,   // full resync of one adsorbate component
+
+    // Volume move: mol_idx = ads_comp, n_mol = N molecules at new scaled positions
+    QUERY_VOLUME      = 400,   // trial full-config query at new cell (tentative)
+    COMMIT_VOLUME     = 401,   // commit accepted volume move (zero payload)
+
+    // Total energy query (for Check_Simulation_Energy / DNN_Prediction_Total)
+    QUERY_TOTAL       = 500,
 };
 
 struct Socket
@@ -29,15 +45,29 @@ struct Socket
     std::vector<std::string> ElementSymbolUsed;
     std::vector<int>Match_Element_PseudoAtom_order; //length = # of PseudoAtoms, value stored = order in the Socket//
 
-    char socket_path[108] = "/tmp/ase_ipi_socket";  // UNIX path limit
+    char socket_path[108];  
+    Socket() {
+        const char* env_path = std::getenv("GRASPA_SOCKET_PATH");
+        std::strncpy(socket_path, env_path ? env_path : "/tmp/ase_ipi_socket", 107);
+        socket_path[107] = '\0';
+    }
+    
     int    fd     = -1;   // UNIX socket file descriptor
     size_t natoms = 0;    // number of atoms sent in last call
-
-    size_t DNN_Molsize = 0; //Atom size to be considered for DNN, since there might be fictional atom sites for a classical sim molecule
 
     size_t nstep = 0;
 
     bool handshake_done = false;
+
+    // Per-call-type timing (seconds) and counters
+    double t_query_delta    = 0.0;  size_t n_query_delta    = 0;
+    double t_commit_insert  = 0.0;  size_t n_commit_insert  = 0;
+    double t_commit_move    = 0.0;  size_t n_commit_move    = 0;
+    double t_commit_delete  = 0.0;  size_t n_commit_delete  = 0;
+    double t_query_total    = 0.0;  size_t n_query_total    = 0;
+    double t_sync_full      = 0.0;  size_t n_sync_full      = 0;
+    double t_query_volume   = 0.0;  size_t n_query_volume   = 0;
+    double t_commit_volume  = 0.0;  size_t n_commit_volume  = 0;
 
     /* Constructor-style init */
     void init(const char *path, int n_atoms)
@@ -137,7 +167,7 @@ struct Socket
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
-        printf("Connecting to CHGNet server at: %s\n", socket_path);
+        printf("Connecting to MLIP server at: %s\n", socket_path);
 
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             perror("connect");
@@ -166,6 +196,15 @@ struct Socket
     void PrimeFrameworkCache()
     {
         size_t n_fw = UCAtoms[0].size;
+
+        printf("[PrimeFW] n_fw=%zu\n", n_fw);
+        printf("[PrimeFW] cell diag: %f %f %f\n", UCBox.Cell[0], UCBox.Cell[4], UCBox.Cell[8]);
+        if(n_fw > 0)
+            printf("[PrimeFW] first atom xyz: %f %f %f type=%zu\n",
+                UCAtoms[0].pos[0].x, UCAtoms[0].pos[0].y, UCAtoms[0].pos[0].z,
+                UCAtoms[0].Type[0]);
+        fflush(stdout);
+
         std::vector<double>  xyz_fw(3 * n_fw);
         std::vector<int32_t> types_fw(n_fw);
         for (size_t i = 0; i < n_fw; i++) {
@@ -173,7 +212,10 @@ struct Socket
             xyz_fw[3*i+1] = UCAtoms[0].pos[i].y;
             xyz_fw[3*i+2] = UCAtoms[0].pos[i].z;
             types_fw[i]   = (int32_t)UCAtoms[0].Type[i];
+            // printf("[PrimeFW] atom %zu: xyz %f %f %f type=%d\n",
+            //     i, xyz_fw[3*i], xyz_fw[3*i+1], xyz_fw[3*i+2], types_fw[i]);
         }
+
         double E_fw_ev = PredictFromSocket(
             xyz_fw.data(), types_fw.data(), n_fw,
             (int32_t)CONFIG_FRAMEWORK, 0);
@@ -309,6 +351,106 @@ struct Socket
         return 0;
     }
 
+    /* Extended send: identical to send_positions but inserts mol_idx [int32]
+       immediately after config_type in the wire payload.  Used by all N-body
+       messages (DELTA_QUERY, COMMIT_*, SYNC_FULL, QUERY_TOTAL).
+       Pass n_atoms=0 and nullptr for xyz/types when there is no position payload. */
+    int send_positions_extended(const double *xyz, const int32_t *types,
+                                size_t n_atoms, int32_t config_type,
+                                int32_t n_mol, int32_t mol_idx)
+    {
+        char header[12];
+
+        // 1. Wait for STATUS
+        read_all(header, 12);
+        if (strncmp(header, "STATUS", 6) != 0) {
+            fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
+            return -1;
+        }
+
+        // 2. Send READY
+        send_header("READY");
+
+        // 3. Wait for POSDATA
+        read_all(header, 12);
+        if (strncmp(header, "POSDATA", 7) != 0) {
+            fprintf(stderr, "Expected POSDATA, got: %.12s\n", header);
+            return -1;
+        }
+
+        // 4. config_type routing tag
+        send_int32(config_type);
+
+        // 5. mol_idx (NEW field distinguishing insertion/move/deletion)
+        send_int32(mol_idx);
+
+        // 6. Cell matrix (9 doubles)
+        write_all(UCBox.Cell, sizeof(double) * 9);
+
+        // 7. Inverse cell (zeroed)
+        double inv_cell[9] = {0};
+        write_all(inv_cell, sizeof(double) * 9);
+
+        // 8. n_mol
+        send_int32(n_mol);
+
+        // 9. n_atoms
+        send_int32((int32_t)n_atoms);
+
+        // 10. Types + positions (omitted when n_atoms == 0)
+        if (n_atoms > 0) {
+            std::vector<int32_t> types_net(n_atoms);
+            for (size_t i = 0; i < n_atoms; i++)
+                types_net[i] = htonl((uint32_t)types[i]);
+            write_all(types_net.data(), sizeof(int32_t) * n_atoms);
+            write_all(xyz, sizeof(double) * 3 * n_atoms);
+        }
+
+        // 11. Wait for STATUS
+        read_all(header, 12);
+        if (strncmp(header, "STATUS", 6) != 0) {
+            fprintf(stderr, "Expected STATUS, got: %.12s\n", header);
+            return -1;
+        }
+
+        // 12. Send HAVEDATA
+        send_header("HAVEDATA");
+
+        // 13. Wait for GETFORCE
+        read_all(header, 12);
+        if (strncmp(header, "GETFORCE", 8) != 0) {
+            fprintf(stderr, "Expected GETFORCE, got: %.12s\n", header);
+            return -1;
+        }
+
+        return 0;
+    }
+
+    /* Extended predict: uses send_positions_extended + receive_energy.
+       Returns the raw energy in eV (caller applies unit conversion). */
+    double PredictFromSocketExtended(const double* xyz, const int32_t* types,
+                                     size_t n_atoms, int32_t config_type,
+                                     int32_t n_mol, int32_t mol_idx)
+    {
+        if (fd < 0) {
+            fprintf(stderr, "Socket not connected — attempting auto-connect\n");
+            if (connect_socket() < 0) {
+                fprintf(stderr, "FATAL: Cannot connect to ML server\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        // printf("[CLIENT_EXT] config_type=%d mol_idx=%d n_mol=%d natoms=%zu\n",
+        //        (int)config_type, (int)mol_idx, (int)n_mol, n_atoms);
+        // fflush(stdout);
+
+        send_positions_extended(xyz, types, n_atoms, config_type, n_mol, mol_idx);
+
+        double energy_ev;
+        receive_energy(&energy_ev);
+        return energy_ev;
+    }
+
     int receive_energy(double *energy_ev)
     {
         char header[12];
@@ -397,47 +539,257 @@ struct Socket
         return energy_ev;
     }
 
-    /* Full evaluation of host-guest interaction for one trial adsorbate molecule.
-       Python returns HG = E(fw+ads) - E_fw_cached - E(ads) directly. */
-    double Predict(size_t ads_comp = 1)
+    // =========================================================================
+    // N-body socket HG energy functions
+    // =========================================================================
+
+    /* QueryDelta — compute ΔE for a trial MC move in the full N-ads context.
+       Server holds the current accepted configuration and returns E(trial) - E_current.
+
+       For non-deletion moves, UCAtoms[ads_comp].pos must already be set
+       (via Check_DNNAtom_and_copy_pos_to_UCAtoms) before calling this function.
+
+       move_type : INSERTION, DELETION, TRANSLATION (or any non-DELETION for move)
+       mol_idx   : -1 for insertion; mol index for move or deletion
+       Returns energy in gRASPA internal units (multiply by DNNEnergyConversion). */
+    double QueryDelta(int move_type, size_t ads_comp, int mol_idx,
+                      double DNNEnergyConversion)
     {
-        size_t n_framework = UCAtoms[0].size;
-        size_t n_adsorbate = UCAtoms[ads_comp].size;
-        size_t n_total     = n_framework + n_adsorbate;
+        int32_t config_type = (int32_t)(200 + ads_comp);
+        size_t  mol_size    = UCAtoms[ads_comp].size;
 
-        std::vector<double>  xyz_total(3 * n_total);
-        std::vector<int32_t> types_total(n_total);
-        size_t counter = 0;
-
-        for (size_t i = 0; i < n_framework; i++)
-        {
-            xyz_total[3*counter + 0] = UCAtoms[0].pos[i].x;
-            xyz_total[3*counter + 1] = UCAtoms[0].pos[i].y;
-            xyz_total[3*counter + 2] = UCAtoms[0].pos[i].z;
-            types_total[counter]     = (int32_t)UCAtoms[0].Type[i];
-            counter++;
-        }
-        for (size_t i = 0; i < n_adsorbate; i++)
-        {
-            xyz_total[3*counter + 0] = UCAtoms[ads_comp].pos[i].x;
-            xyz_total[3*counter + 1] = UCAtoms[ads_comp].pos[i].y;
-            xyz_total[3*counter + 2] = UCAtoms[ads_comp].pos[i].z;
-            types_total[counter]     = (int32_t)UCAtoms[ads_comp].Type[i];
-            counter++;
+        double _t0 = omp_get_wtime();
+        if (move_type == DELETION) {
+            // No position data — server removes mol_idx from stored config
+            double E_ev = PredictFromSocketExtended(nullptr, nullptr, 0,
+                                                    config_type, 0, (int32_t)mol_idx);
+            t_query_delta += omp_get_wtime() - _t0;
+            n_query_delta++;
+            return E_ev * DNNEnergyConversion;
         }
 
-        // Python returns HG = E(fw+ads) - E_fw_cached - E(ads) directly
-        double HG_ev = PredictFromSocket(xyz_total.data(), types_total.data(),
-                                         n_total, (int32_t)(100 + ads_comp), 1);
-        printf("ML HG_ev = %.6f eV\n", HG_ev);
-        return HG_ev;
+        // Insertion or move: send trial position from UCAtoms[ads_comp]
+        std::vector<double>  xyz(3 * mol_size);
+        std::vector<int32_t> types(mol_size);
+        for (size_t i = 0; i < mol_size; i++) {
+            double3 wrapped   = WrapPositionIntoUCBox(UCAtoms[ads_comp].pos[i]);
+            xyz[3*i+0]        = wrapped.x;
+            xyz[3*i+1]        = wrapped.y;
+            xyz[3*i+2]        = wrapped.z;
+            types[i]          = (int32_t)UCAtoms[ads_comp].Type[i];
+        }
+        double E_ev = PredictFromSocketExtended(xyz.data(), types.data(), mol_size,
+                                                config_type, 1, (int32_t)mol_idx);
+        t_query_delta += omp_get_wtime() - _t0;
+        n_query_delta++;
+        return E_ev * DNNEnergyConversion;
     }
 
-    /* Clean shutdown */
+    /* CommitInsert — tell server to append the just-accepted molecule.
+       UCAtoms[ads_comp].pos must already be set to the accepted position. */
+    void CommitInsert(size_t ads_comp)
+    {
+        double _t0 = omp_get_wtime();
+        PredictFromSocketExtended(nullptr, nullptr, 0,
+                                  (int32_t)COMMIT_INSERT, 1, -1);
+        t_commit_insert += omp_get_wtime() - _t0;
+        n_commit_insert++;
+    }
+
+    /* CommitDelete — tell server to swap-delete mol_idx from its stored config. */
+    void CommitDelete(size_t ads_comp, int mol_idx)
+    {
+        double _t0 = omp_get_wtime();
+        PredictFromSocketExtended(nullptr, nullptr, 0,
+                                  (int32_t)COMMIT_DELETE, 0, (int32_t)mol_idx);
+        t_commit_delete += omp_get_wtime() - _t0;
+        n_commit_delete++;
+    }
+
+    /* CommitMove — tell server to update mol_idx to the new accepted position.
+       UCAtoms[ads_comp].pos must already be set to the new accepted position. */
+    void CommitMove(size_t ads_comp, int mol_idx)
+    {
+        double _t0 = omp_get_wtime();
+        PredictFromSocketExtended(nullptr, nullptr, 0,
+                                  (int32_t)COMMIT_MOVE, 1, (int32_t)mol_idx);
+        t_commit_move += omp_get_wtime() - _t0;
+        n_commit_move++;
+    }
+
+    /* SyncFull — resync the full adsorbate configuration for one component.
+       Called once per adsorbate component after CreateMolecule_InOneBox.
+       host_positions : HostSystem[ads_comp].pos  (all N molecules concatenated)
+       full_molsize   : Moleculesize[ads_comp]     (including fictional charge sites)
+       consider_atom  : ConsiderThisAdsorbateAtom  (length = full_molsize) */
+    void SyncFull(size_t ads_comp, size_t n_mol, size_t full_molsize,
+                  double3* host_positions, bool* consider_atom)
+    {
+        if (n_mol == 0) return;
+
+        size_t mol_size = UCAtoms[ads_comp].size;
+        size_t n_total  = n_mol * mol_size;
+        std::vector<double>  xyz(3 * n_total);
+        std::vector<int32_t> types(n_total);
+
+        size_t counter = 0;
+        for (size_t i = 0; i < n_mol; i++) {
+            size_t type_i = 0;
+            for (size_t j = 0; j < full_molsize; j++) {
+                if (!consider_atom[j]) continue;
+                size_t atom_idx = i * full_molsize + j;
+                double3 wrapped = WrapPositionIntoUCBox(host_positions[atom_idx]);
+                xyz[3*counter+0] = wrapped.x;
+                xyz[3*counter+1] = wrapped.y;
+                xyz[3*counter+2] = wrapped.z;
+                types[counter]   = (int32_t)UCAtoms[ads_comp].Type[type_i];
+                counter++;
+                type_i++;
+            }
+        }
+        printf("[SYNC_FULL] comp=%zu n_mol=%zu total_atoms=%zu\n",
+               ads_comp, n_mol, n_total);
+        double _t0 = omp_get_wtime();
+        PredictFromSocketExtended(xyz.data(), types.data(), n_total,
+                                  (int32_t)SYNC_FULL, (int32_t)n_mol, (int32_t)ads_comp);
+        t_sync_full += omp_get_wtime() - _t0;
+        n_sync_full++;
+    }
+
+    /* QueryTotal — return E_current - E_fw_cached (= total HG energy with all ads).
+       Used by DNN_Prediction_Total / Check_Simulation_Energy.
+       Returns energy in gRASPA internal units. */
+    double QueryTotal(double DNNEnergyConversion)
+    {
+        double _t0 = omp_get_wtime();
+        double E_ev = PredictFromSocketExtended(nullptr, nullptr, 0,
+                                               (int32_t)QUERY_TOTAL, 0, 0);
+        t_query_total += omp_get_wtime() - _t0;
+        n_query_total++;
+        printf("[QUERY_TOTAL] E_total_ev=%.6f\n", E_ev);
+        return E_ev * DNNEnergyConversion;
+    }
+
+    /* Compute 3x3 matrix inverse in-place (no malloc).
+       Layout: row-major, x[row*3+col]. */
+    void compute_inverse_cell_inplace(double* cell, double* inv)
+    {
+        double m11=cell[0], m21=cell[3], m31=cell[6];
+        double m12=cell[1], m22=cell[4], m32=cell[7];
+        double m13=cell[2], m23=cell[5], m33=cell[8];
+        double det = m11*(m22*m33-m23*m32) - m12*(m21*m33-m23*m31) + m13*(m21*m32-m22*m31);
+        inv[0]=+(m22*m33-m32*m23)/det; inv[3]=-(m21*m33-m31*m23)/det; inv[6]=+(m21*m32-m31*m22)/det;
+        inv[1]=-(m12*m33-m32*m13)/det; inv[4]=+(m11*m33-m31*m13)/det; inv[7]=-(m11*m32-m31*m12)/det;
+        inv[2]=+(m12*m23-m22*m13)/det; inv[5]=-(m11*m23-m21*m13)/det; inv[8]=+(m11*m22-m21*m12)/det;
+    }
+
+    /* QueryVolume — trial full-configuration query at new (scaled) box volume.
+       Temporarily installs new_cell into UCBox so wrapping and wire format use
+       the correct cell; restores original cell on return (no server commit).
+
+       host_positions : all molecules of ads_comp at NEW scaled positions,
+                        laid out as [mol0_atom0, mol0_atom1, ..., mol1_atom0, ...]
+                        (full_molsize atoms per molecule, massless sites included)
+       new_cell       : 9-element row-major cell matrix after isotropic scaling
+
+       Returns ΔE = E(trial) - E_current in gRASPA internal units. */
+    double QueryVolume(size_t ads_comp, size_t n_mol, size_t full_molsize,
+                       double3* host_positions, bool* consider_atom,
+                       double* new_cell, double DNNEnergyConversion)
+    {
+        // Save current cell / inverse
+        double saved_cell[9], saved_inv[9];
+        memcpy(saved_cell, UCBox.Cell,        9 * sizeof(double));
+        memcpy(saved_inv,  UCBox.InverseCell, 9 * sizeof(double));
+
+        // Temporarily install new cell (for WrapPositionIntoUCBox + wire send)
+        memcpy(UCBox.Cell, new_cell, 9 * sizeof(double));
+        compute_inverse_cell_inplace(UCBox.Cell, UCBox.InverseCell);
+
+        size_t mol_size = UCAtoms[ads_comp].size;   // DNN-considered atoms per mol
+        size_t n_total  = n_mol * mol_size;
+        std::vector<double>  xyz(3 * n_total);
+        std::vector<int32_t> types(n_total);
+
+        size_t counter = 0;
+        for (size_t i = 0; i < n_mol; i++) {
+            size_t type_i = 0;
+            for (size_t j = 0; j < full_molsize; j++) {
+                if (!consider_atom[j]) continue;
+                double3 wrapped  = WrapPositionIntoUCBox(host_positions[i * full_molsize + j]);
+                xyz[3*counter+0] = wrapped.x;
+                xyz[3*counter+1] = wrapped.y;
+                xyz[3*counter+2] = wrapped.z;
+                types[counter]   = (int32_t)UCAtoms[ads_comp].Type[type_i];
+                counter++;
+                type_i++;
+            }
+        }
+
+        double _t0 = omp_get_wtime();
+        double E_ev = PredictFromSocketExtended(xyz.data(), types.data(), n_total,
+                                                (int32_t)QUERY_VOLUME,
+                                                (int32_t)n_mol, (int32_t)ads_comp);
+        t_query_volume += omp_get_wtime() - _t0;
+        n_query_volume++;
+
+        // Restore original cell
+        memcpy(UCBox.Cell,        saved_cell, 9 * sizeof(double));
+        memcpy(UCBox.InverseCell, saved_inv,  9 * sizeof(double));
+
+        return E_ev * DNNEnergyConversion;
+    }
+
+    /* CommitVolume — notify server that the volume move was accepted and
+       permanently update UCBox to the new cell.
+
+       Sends a zero-payload COMMIT_VOLUME message so the server can commit
+       the pending_volume_mols / pending_E it stored during QUERY_VOLUME.
+       new_cell must be the same cell passed to the preceding QueryVolume call. */
+    void CommitVolume(size_t ads_comp, size_t n_mol, double* new_cell)
+    {
+        // Permanently update client cell (must match what was sent in QueryVolume)
+        memcpy(UCBox.Cell, new_cell, 9 * sizeof(double));
+        compute_inverse_cell_inplace(UCBox.Cell, UCBox.InverseCell);
+
+        double _t0 = omp_get_wtime();
+        PredictFromSocketExtended(nullptr, nullptr, 0,
+                                  (int32_t)COMMIT_VOLUME,
+                                  (int32_t)n_mol, (int32_t)ads_comp);
+        t_commit_volume += omp_get_wtime() - _t0;
+        n_commit_volume++;
+    }
+
+    void PrintTimingSummary(FILE* out) const {
+        fprintf(out, "=== CLIENT-SIDE SOCKET TIMING SUMMARY ===\n");
+        double total = t_query_delta + t_commit_insert + t_commit_move
+                     + t_commit_delete + t_query_total + t_sync_full
+                     + t_query_volume  + t_commit_volume;
+        auto row = [&](const char* label, double t, size_t n) {
+            if (n > 0)
+                fprintf(out, "  %-20s %8.3f s  %6zu calls  %8.3f ms/call\n",
+                        label, t, n, 1000.0 * t / n);
+        };
+        row("QueryDelta",    t_query_delta,   n_query_delta);
+        row("CommitInsert",  t_commit_insert, n_commit_insert);
+        row("CommitMove",    t_commit_move,   n_commit_move);
+        row("CommitDelete",  t_commit_delete, n_commit_delete);
+        row("QueryTotal",    t_query_total,   n_query_total);
+        row("SyncFull",      t_sync_full,     n_sync_full);
+        row("QueryVolume",   t_query_volume,  n_query_volume);
+        row("CommitVolume",  t_commit_volume, n_commit_volume);
+        fprintf(out, "  %-20s %8.3f s\n", "TOTAL socket time", total);
+        fprintf(out, "==========================================\n");
+    }
+
+    /* Clean shutdown — use shutdown(SHUT_WR) to signal EOF gracefully.
+     * Sending "EXIT" then immediately close(fd) can race: the kernel may
+     * send RST before the server reads the EXIT bytes, causing ECONNRESET
+     * on the Python side and preventing the timing summary from printing. */
     void close_socket()
     {
         if (fd >= 0) {
-            send_command("EXIT");
+            shutdown(fd, SHUT_WR);  // flush + signal EOF; server reads clean close
             close(fd);
             fd = -1;
         }
@@ -449,13 +801,18 @@ struct Socket
         Match_Element_PseudoAtom_order.resize(PseudoAtoms.Symbol.size(), -1);
         for(size_t i = 0; i < PseudoAtoms.Symbol.size(); i++)
         {
-        for(size_t j = 0; j < ElementSymbolUsed.size(); j++)
-            if(PseudoAtoms.Symbol[i] == ElementSymbolUsed[j])
+            if(PseudoAtoms.mass[i] <= 0.0)
             {
-            Match_Element_PseudoAtom_order[i] = j;
-            printf("PseudoAtom Symbol[%zu]: %s, Socket Symbol[%zu]: %s, MATCHED\n", i, PseudoAtoms.Symbol[i].c_str(), j, ElementSymbolUsed[j].c_str());
-            break;
+                printf("PseudoAtom Symbol[%zu]: %s — massless, skipping\n", i, PseudoAtoms.Symbol[i].c_str());
+                continue;
             }
+            for(size_t j = 0; j < ElementSymbolUsed.size(); j++)
+                if(PseudoAtoms.Symbol[i] == ElementSymbolUsed[j])
+                {
+                    Match_Element_PseudoAtom_order[i] = j;
+                    printf("PseudoAtom Symbol[%zu]: %s, Socket Symbol[%zu]: %s, MATCHED\n", i, PseudoAtoms.Symbol[i].c_str(), j, ElementSymbolUsed[j].c_str());
+                    break;
+                }
         }
     }
 
@@ -538,23 +895,6 @@ struct Socket
         return strs;
     }
 
-    bool caseInSensStringCompare(const std::string& str1, const std::string& str2)
-    {
-        return str1.size() == str2.size() && std::equal(str1.begin(), str1.end(), str2.begin(), [](auto a, auto b) {return std::tolower(a) == std::tolower(b); });
-    }
-
-    void Split_Tab_Space(std::vector<std::string>& termsScannedLined, std::string& str)
-    {
-        if (str.find("\t", 0) != std::string::npos) //if the delimiter is tab
-        {
-        termsScannedLined = split(str, '\t');
-        }
-        else
-        {
-        termsScannedLined = split(str, ' ');
-        }
-    }
-
     void AllocateUCSpace(size_t comp)
     {
         UCAtoms[comp].pos   = (double3*) malloc(UCAtoms[comp].size * sizeof(double3));
@@ -585,7 +925,9 @@ struct Socket
     //TIP4P HostAtoms.Molsize = 4, here we want UCAtoms.size = 3//
     void CopyAtomsFromFirstUnitcell(Atoms& HostAtoms, size_t comp, int3 NSupercell, PseudoAtomDefinitions& PseudoAtoms, bool* ConsiderThisAdsorbateAtom)
     {
-        size_t NAtoms = HostAtoms.Molsize / (NSupercell.x * NSupercell.y * NSupercell.z);
+        size_t denom = (size_t)NSupercell.x * NSupercell.y * NSupercell.z;
+        if(denom == 0 || HostAtoms.Molsize == 0) { UCAtoms[comp].size = 0; return; } // empty-box framework
+        size_t NAtoms = HostAtoms.Molsize / denom;
         if(HostAtoms.size % NAtoms != 0) throw std::runtime_error("SuperCell size cannot be divided by number of supercell atoms!!!!");
         UCAtoms[comp].size = NAtoms;
         //During the initialization phase, for adsorbate atoms, exclude those that are NOT considered in DNN.
@@ -596,8 +938,7 @@ struct Socket
             for(size_t i = 0; i < NAtoms; i++)
                 if(ConsiderThisAdsorbateAtom[i])
                     dnn_size++;
-            DNN_Molsize = dnn_size;          // store for any other readers, but do NOT accumulate across components
-            UCAtoms[comp].size = dnn_size;   // use local count directly
+            UCAtoms[comp].size = dnn_size;
         }
         AllocateUCSpace(comp);
 
@@ -650,76 +991,6 @@ struct Socket
         double3 flr  = {floor(fpos.x), floor(fpos.y), floor(fpos.z)};
         double3 nfpos = {fpos.x - flr.x, fpos.y - flr.y, fpos.z - flr.z};
         return GetRealCoordFromFractional(UCBox.Cell, UCBox.Cubic, nfpos);
-    }
-
-    // Called from PATCH_SOCKET_FXNMAIN (DNN_Prediction_Total).
-    // Sends fw + all N adsorbate molecules in a single socket call.
-    // Python returns HG = E(fw+N_ads) - E_fw_cached - E(N_ads together).
-    // C++ multiplies by DNNEnergyConversion.
-    //
-    // host_positions : HostSystem[ads_comp].pos  (full simulation box coords, host ptr)
-    // full_molsize   : Moleculesize[ads_comp]     (including fictional charge sites)
-    // consider_atom  : ConsiderThisAdsorbateAtom  (length = full_molsize)
-    // Returns energy already converted to gRASPA internal units (10 J/mol).
-    double PredictTotal(size_t ads_comp, size_t n_mol, size_t full_molsize,
-                        double3* host_positions, bool* consider_atom,
-                        double DNNEnergyConversion)
-    {
-        if (n_mol == 0) return 0.0;
-
-        size_t n_fw        = UCAtoms[0].size;
-        size_t mol_size    = DNN_Molsize;            // atoms per molecule after filtering
-        size_t n_ads_total = n_mol * mol_size;
-        size_t n_total     = n_fw + n_ads_total;
-
-        std::vector<double>  xyz(3 * n_total);
-        std::vector<int32_t> types(n_total);
-
-        // Framework atoms (pre-computed, stable)
-        size_t counter = 0;
-        for (size_t i = 0; i < n_fw; i++) {
-            xyz[3*counter+0] = UCAtoms[0].pos[i].x;
-            xyz[3*counter+1] = UCAtoms[0].pos[i].y;
-            xyz[3*counter+2] = UCAtoms[0].pos[i].z;
-            types[counter]   = (int32_t)UCAtoms[0].Type[i];
-            counter++;
-        }
-
-        // All adsorbate molecules — wrap each atom into UCBox
-        for (size_t i = 0; i < n_mol; i++) {
-            size_t type_i = 0;
-            for (size_t j = 0; j < full_molsize; j++) {
-                if (!consider_atom[j]) continue;
-                size_t atom_idx  = i * full_molsize + j;
-                double3 wrapped  = WrapPositionIntoUCBox(host_positions[atom_idx]);
-                xyz[3*counter+0] = wrapped.x;
-                xyz[3*counter+1] = wrapped.y;
-                xyz[3*counter+2] = wrapped.z;
-                types[counter]   = (int32_t)UCAtoms[ads_comp].Type[type_i];
-                counter++;
-                type_i++;
-            }
-        }
-
-        int32_t config_type_val = (int32_t)(100 + ads_comp);
-        // Python returns HG = E(fw+N_ads) - E_fw_cached - E(N_ads together)
-        double HG_ev = PredictFromSocket(xyz.data(), types.data(), n_total,
-                                         config_type_val, (int32_t)n_mol);
-
-        printf("ML PredictTotal: n_mol=%zu  HG=%.6f eV\n", n_mol, HG_ev);
-
-        return HG_ev * DNNEnergyConversion;
-    }
-
-    //This function is called after the position of the trial adsorbate molecule is prepared in UCAtoms//
-    double MCEnergyWrapper(size_t comp, bool Initialize, double DNNEnergyConversion)
-    {
-        WrapSuperCellAtomIntoUCBox(comp);
-
-        double DNN_E = Predict(comp);
-        //This generates the unit of eV, convert to 10J/mol.
-        //https://www.weizmann.ac.il/oc/martin/tools/hartree.html
-        return DNN_E * DNNEnergyConversion;
     }
 
     };

@@ -264,7 +264,6 @@ void read_simulation_input(Variables& Vars, bool *ReadRestart, bool *SameFramewo
         Vars.TempWidom.Useflag = true;
       }
     }
-  
     if (str.find("RandomSeed", 0) != std::string::npos)
     {
       Split_Tab_Space(termsScannedLined, str);
@@ -2812,12 +2811,12 @@ void LMPDataFileParser(Boxsize& Box, Components& SystemComponents)
   file.close();
 }
 
-void RestartFileParser(Boxsize& Box, Components& SystemComponents)
+void RestartFileParser(Boxsize& Box, Components& SystemComponents, size_t systemId)
 {
   std::string scannedLine; std::string str;
   std::vector<std::string> termsScannedLined{};
   //Determine framework name (file name)//
-  std::string Filename = "RestartInitial/System_0/restartfile";
+  std::string Filename = "RestartInitial/System_" + std::to_string(systemId) + "/restartfile";
   std::ifstream file(Filename);
   std::filesystem::path pathfile = std::filesystem::path(Filename);
   if (!std::filesystem::exists(pathfile))
@@ -3072,7 +3071,22 @@ void ReadDNNModelSetup(Components& SystemComponents)
         SystemComponents.UseDNNforHostGuest = true;
         //printf("Using DNN Model\n");
       }
-      break;
+    }
+    if (str.find("DebugMode", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      if(caseInSensStringCompare(termsScannedLined[1], "yes"))
+      {
+        SystemComponents.DebugMode = true;
+      }
+    }
+    if (str.find("UsePureDNN", 0) != std::string::npos)
+    {
+      Split_Tab_Space(termsScannedLined, str);
+      if(caseInSensStringCompare(termsScannedLined[1], "yes"))
+      {
+        SystemComponents.UsePureDNN = true;
+      }
     }
   }
   if(!SystemComponents.UseDNNforHostGuest) return;

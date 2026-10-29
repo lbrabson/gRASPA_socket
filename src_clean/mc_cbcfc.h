@@ -328,6 +328,8 @@ static inline MoveEnergy CBCFMove(Variables& Vars, size_t systemId)
       SystemComponents.Tmmc[SelectedComponent].ApplyTMBiasCBCF(preFactor, NMol, Binchange);
 
       if(Get_Uniform_Random() < preFactor * Rosenbluth / IdealRosen) Accepted = true;
+      // printf("  total=%.6f %s\n", energy.total(), Accepted ? "ACCEPTED" : "REJECTED");
+      // fflush(stdout);
       SystemComponents.Tmmc[SelectedComponent].TreatAccOutofBoundCBCF(Accepted, NMol, Binchange);
 
       //printf("Insertion E: %.5f, Acc: %s\n", energy.total(), Accepted ? "Accept" : "Reject");
@@ -415,6 +417,8 @@ static inline MoveEnergy CBCFMove(Variables& Vars, size_t systemId)
       SystemComponents.Tmmc[SelectedComponent].ApplyTMBiasCBCF(preFactor, NMol, Binchange);
 
       if(Get_Uniform_Random() < preFactor * IdealRosen / Rosenbluth) Accepted = true;
+      // printf("  total=%.6f %s\n", second_step_energy.total(), Accepted ? "ACCEPTED" : "REJECTED");
+      // fflush(stdout);
       SystemComponents.Tmmc[SelectedComponent].TreatAccOutofBoundCBCF(Accepted, NMol, Binchange);
 
       if(Accepted)
