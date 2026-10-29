@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-29 - Fix: revert commit d02c60b (patch resinsertion moves without CBMC as large trans + rot)
+
+---
+
 ## 2026-05-09 — Fix: inverted acceptance-ratio direction in `Update_Max_GibbsVolume`
 
 **Summary:** `Update_Max_GibbsVolume` in `src_clean/mc_box.h` computed the step-size
